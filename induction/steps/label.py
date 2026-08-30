@@ -1,10 +1,12 @@
 """Step 5 — Label: name activities; merge the same activity done by many people.
 
-Baseline (deterministic, tier `direct`): name by action + object. That is all
-the LLM upgrade would replace — and the guardrail is strict: an LLM may *name*
-and *judge equivalence*, never do structural work (correlation or ordering), or
-it will hallucinate a plausible process that never ran. The skeleton stays
-deterministic; see README for the upgrade hook.
+Baseline (deterministic): an activity is named by its **raw action** — the label
+the source itself gave it ("authored", "invoice_approved"). No hardcoded rename
+table lives here: the DEFAULT is to leave the action untouched, and a source
+`Profile` may map actions to friendlier words. That is all the LLM upgrade would
+replace — and the guardrail is strict: an LLM may *name* and *judge equivalence*,
+never do structural work (correlation or ordering), or it will hallucinate a
+plausible process that never ran. The skeleton stays deterministic.
 
 The graded case here is **same-activity-different-people**. A co-authored commit
 is one authoring activity performed by several people — it surfaces as sibling
@@ -21,16 +23,8 @@ from dataclasses import dataclass, field
 from induction.adapters import Shaped
 from induction.model import Evidence, direct
 from induction.process import Step
+from induction.profiles import GENERIC_PROFILE, Profile
 from induction.steps.correlate import Correlation
-
-_ACTIVITY_NAMES = {
-    "authored": "Author change",
-    "committed": "Apply / land change",
-    "merged": "Merge pull request",
-    "reverted": "Revert change",
-    "released": "Tag release",
-    "reviewed": "Review (off-system)",
-}
 
 
 @dataclass
@@ -67,7 +61,7 @@ class LabelResult:
     merges: list[ActivityMerge] = field(default_factory=list)
 
 
-def label(shaped: Shaped, corr: Correlation) -> LabelResult:
+def label(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFILE) -> LabelResult:
     # --- activity catalogue: one named Step per action, traceable to its events ---
     by_action: dict[str, list] = defaultdict(list)
     for ev in shaped.events:
@@ -78,9 +72,9 @@ def label(shaped: Shaped, corr: Correlation) -> LabelResult:
         members = sorted({e.actor for e in evs if e.actor})
         steps.append(Step(
             id=f"step:{action}",
-            name=_ACTIVITY_NAMES.get(action, action.replace("_", " ").title()),
+            name=profile.label_action(action),
             action=action,
-            confidence=direct("named deterministically from the event's action + object"),
+            confidence=direct("named from the source's own action verb"),
             member_ids=members,
             event_ids=[e.id for e in evs],
             evidence=[e.evidence[0] for e in evs[:3] if e.evidence],

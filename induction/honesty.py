@@ -24,6 +24,7 @@ from collections import defaultdict
 from induction.adapters import Shaped
 from induction.model import Evidence
 from induction.process import Case, Orphan, ProcessKind
+from induction.profiles import GENERIC_PROFILE, Profile
 from induction.steps.correlate import Correlation
 
 
@@ -70,48 +71,20 @@ def _orphan_reason(ent) -> str:
     return f"{ent.type} record matched no correlation key"
 
 
-# The value a *code contribution* produces is a change to source or tests. A
-# recurring pattern that never does that, and is machine-driven, is a strong
-# "looks like a process, isn't" candidate.
-_REJECTABLE_KINDS = {"dependency_bumps", "ci_maintenance"}
+def apply_reject(kinds: list[ProcessKind], profile: Profile = GENERIC_PROFILE) -> None:
+    """Flag look-alike non-processes in place, with a concrete reason.
 
+    The *decision* is domain knowledge, so it lives in the profile: the generic
+    default flags any recurring, fully-automated cluster (it cannot prove such a
+    cluster "produces nothing" without domain knowledge, and says so); a source
+    profile can sharpen it (git un-flags bot runs that actually change code).
 
-def apply_reject(kinds: list[ProcessKind], shaped: Shaped, corr: Correlation) -> None:
-    """Flag look-alike non-processes in place, with a concrete, evidenced reason.
-
-    We only *flag* — we never delete. The rejected kind stays fully inspectable
-    so a reader can disagree; that is the point of showing the rejection and its
+    We only *flag* — never delete. The rejected kind stays fully inspectable so a
+    reader can disagree; that is the point of showing the rejection and its
     reason rather than quietly filtering it out.
     """
-    entities_by_id = {e.id: e for e in shaped.entities}
     for kind in kinds:
-        if kind.id not in _REJECTABLE_KINDS:
-            continue
-        moves_product = _touches_product_code(kind, corr, entities_by_id)
-        if moves_product:
-            # It sometimes changes real code — don't reject; just note it's noisy.
-            continue
-        kind.rejected = True
-        driver = "a dependency bot" if kind.id == "dependency_bumps" else "a CI/formatting bot"
-        kind.reject_reason = (
-            f"Recurring, machine-driven ({driver}) commits that move no product "
-            f"artefact (no change to src/ or tests/) and produce nothing the "
-            f"contribution process exists to produce. Looks like a process; isn't "
-            f"one worth surfacing as work. Flagged, not deleted — {len(kind.case_ids)} "
-            f"cases remain inspectable."
-        )
-
-
-def _touches_product_code(kind: ProcessKind, corr: Correlation, entities_by_id: dict) -> bool:
-    for case_id in kind.case_ids:
-        case = corr.cases.get(case_id)
-        if not case:
-            continue
-        for eid in case.entity_ids:
-            ent = entities_by_id.get(eid)
-            if ent is None or ent.type != "commit":
-                continue
-            for f in ent.attrs.get("files", []):
-                if f.startswith("src/") or f.startswith("tests/") or "/tests/" in f:
-                    return True
-    return False
+        reason = profile.reject_reason(kind.features)
+        if reason:
+            kind.rejected = True
+            kind.reject_reason = reason

@@ -52,7 +52,7 @@ def build_view(m: InducedModel) -> dict:
 
     return {
         "meta": {
-            "slug": m.slug, "manifest": m.manifest,
+            "slug": m.slug, "manifest": m.manifest, "profile": m.profile_id,
             "tier_legend": TIER_LEGEND, "disclaimers": DISCLAIMERS,
             "stats": _stats(m),
         },
@@ -214,7 +214,7 @@ const tierChip = c => c ? `<span class="chip ${c.tier}" title="${(c.rationale||'
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 
 document.getElementById('subtitle').innerHTML =
-  `corpus <b>${esc(D.meta.slug)}</b> · git history @ <code>${esc((D.meta.manifest.head||'').slice(0,10))}</code> · ${D.meta.manifest.n_commits||'?'} commits`;
+  `corpus <b>${esc(D.meta.slug)}</b> · git history @ <code>${esc((D.meta.manifest.head||'').slice(0,10))}</code> · ${D.meta.manifest.n_commits||'?'} commits · vocabulary: <b>${esc(D.meta.profile||'generic')}</b>`;
 document.getElementById('legend').innerHTML = Object.entries(D.meta.tier_legend)
   .map(([t,desc])=>`<span><span class="chip ${t}">${t}</span> ${esc(desc)}</span>`).join('');
 const s = D.meta.stats;

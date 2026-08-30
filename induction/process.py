@@ -162,6 +162,7 @@ class ProcessKind:
     variants: list[Variant] = field(default_factory=list)
     dfg: dict = field(default_factory=dict)          # {"nodes":[...], "edges":[...]}
     steps: list[str] = field(default_factory=list)   # step ids seen in this kind
+    features: dict = field(default_factory=dict)     # the structural features it clustered on
     rejected: bool = False
     reject_reason: Optional[str] = None
 
@@ -176,6 +177,7 @@ class ProcessKind:
             "variants": [v.to_dict() for v in self.variants],
             "dfg": self.dfg,
             "steps": self.steps,
+            "features": self.features,
             "rejected": self.rejected,
             "reject_reason": self.reject_reason,
         }

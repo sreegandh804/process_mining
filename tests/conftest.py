@@ -38,7 +38,7 @@ def _c(sha, subject, author, committer, adate, cdate, parents, files, body=""):
         "is_merge": len(parents) > 1,
         "author": person(author), "committer": person(committer),
         "author_date": adate, "committer_date": cdate,
-        "refs": (["HEAD -> main"] if sha == "d1" else []),
+        "refs": (["HEAD -> main"] if sha == "d2" else []),
         "subject": subject, "body": body, "files": files,
     }
 
@@ -50,6 +50,8 @@ BOT = ("dependabot[bot]", "49699333+dependabot[bot]@users.noreply.github.com")
 
 # newest-first, the way `git log` emits and the adapter expects
 COMMITS = [
+    _c("d2", "Bump other from 2.0 to 2.1 (#4)", BOT, BOT,
+       "2024-02-02T09:00:00+00:00", "2024-02-02T09:00:00+00:00", ["d1"], ["requirements.txt"]),
     _c("d1", "Bump lib from 1.0 to 1.1 (#3)", BOT, BOT,
        "2024-02-01T09:00:00+00:00", "2024-02-01T09:00:00+00:00", ["o1"], ["requirements.txt"]),
     _c("o1", "tweak readme wording", ALICE, ALICE,
@@ -99,15 +101,26 @@ def mini_raw(tmp_path_factory) -> tuple[str, str]:
     (raw / f"{KEY}.tags.json").write_text(json.dumps(TAGS))
     (raw / f"{KEY}.CHANGES.rst").write_text(CHANGES)
     (raw / f"{KEY}.manifest.json").write_text(json.dumps(
-        {"slug": SLUG, "head": "d1", "n_commits": len(COMMITS)}))
+        {"slug": SLUG, "head": "d2", "n_commits": len(COMMITS)}))
     return str(raw), SLUG
 
 
 @pytest.fixture(scope="session")
 def mini_model(mini_raw):
+    """The DEFAULT model: the generic, source-agnostic profile (unnamed kinds
+    and activities). This is what the product does on data it knows nothing about."""
     from induction.pipeline import run_pipeline
     raw_dir, slug = mini_raw
     return run_pipeline(slug, raw_dir, with_thin=True)
+
+
+@pytest.fixture(scope="session")
+def mini_model_git(mini_raw):
+    """The same data with the opt-in git vocabulary — names, no structural change."""
+    from induction.pipeline import run_pipeline
+    from induction.profiles import GIT_PROFILE
+    raw_dir, slug = mini_raw
+    return run_pipeline(slug, raw_dir, with_thin=True, profile=GIT_PROFILE)
 
 
 @pytest.fixture(scope="session")

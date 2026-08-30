@@ -1,124 +1,116 @@
 """Step 0 — Segment: separate the different *kinds* of process.
 
 Hold the line the reviewers will probe:
-  - Segment (step 0) = different *kinds* of process (contribution vs release vs
-    dependency bumps) — distinct processes.
+  - Segment (step 0) = different *kinds* of process — distinct processes.
   - Variant (step 4) = different *runs of one kind*.
 
 Nothing in the data announces where one kind ends and the next begins, so every
-boundary here is an **inference**, tier `heuristic`, and correctable. We do not
-inflate it: on a single repo the kinds are few and mostly legible from who acts
-and what they touch. Embeddings could *propose* finer boundaries — that is the
-documented upgrade path, deliberately not built (similar text != same process).
+boundary here is an **inference** (tier `heuristic`) and correctable.
 
-Baseline rules, strongest signal first:
-  release_and_backport : the case is a release/integration train.
-  dependency_bumps     : commits authored by a dependency bot (dependabot, ...).
-  ci_maintenance       : commits authored by a CI bot (pre-commit-ci, ...).
-  documentation        : commits that only ever touch docs.
-  code_contribution    : everything else — the actual PR/issue contribution flow.
+The DEFAULT baseline is deliberately source-agnostic and **unnamed**: we cluster
+runs by structure alone — whether they are automated vs human-driven, and their
+correlation anchor — and leave the resulting kinds as `kind_1`, `kind_2`, … with
+a *data-derived* rationale. We will not invent domain names ("dependency bump",
+"release") for data we know nothing about; naming is deferred to a source
+`Profile` or a human. A profile (e.g. the git one) can refine the clustering and
+supply real names — but that is an overlay, never a requirement.
+
+Embeddings would *propose* finer boundaries — the documented upgrade path,
+deliberately not built (similar text != same process).
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from induction.adapters import Shaped
-from induction.model import Entity, heuristic
-from induction.process import Case, ProcessKind
+from induction.model import heuristic
+from induction.process import ProcessKind
+from induction.profiles import GENERIC_PROFILE, Profile
 from induction.steps.correlate import Correlation
 from induction.steps.variants import induced_variants
 
-_KIND_NAMES = {
-    "code_contribution": "Code contribution (feature / fix)",
-    "release_and_backport": "Release & backport",
-    "dependency_bumps": "Dependency bumps (bot)",
-    "ci_maintenance": "CI / tooling maintenance (bot)",
-    "documentation": "Documentation change",
-    "release_notes": "Release notes (thin source — order unknown)",
-}
-_KIND_RATIONALE = {
-    "code_contribution": "PR/issue runs whose commits change source or tests and are authored by people.",
-    "release_and_backport": "Release-train and backport integration merges (long-lived release branches).",
-    "dependency_bumps": "Recurring commits authored by a dependency bot — candidate 'looks like a process, isn't'.",
-    "ci_maintenance": "Recurring commits authored by a CI/formatting bot — candidate 'looks like a process, isn't'.",
-    "documentation": "Runs whose commits only ever touch documentation files.",
-    "release_notes": "Changelog version sections that did not correlate to a git case — thin, order-unknown observations.",
-}
 
-_DOC_SUFFIXES = (".rst", ".md")
-
-
-def _is_doc(path: str) -> bool:
-    return path.startswith("docs/") or path.endswith(_DOC_SUFFIXES)
-
-
-def _classify(case: Case, commit_ents: list[Entity], people: dict[str, Entity]) -> str:
-    if case.kind_hint == "notes":
-        return "release_notes"
-    if case.kind_hint in ("release", "integration"):
-        return "release_and_backport"
-
-    if not commit_ents:
-        return "code_contribution"
-
-    # Who authored the work, and are they bots?
-    bot_domains = defaultdict(int)
-    human = 0
-    all_files: list[str] = []
-    for ce in commit_ents:
-        all_files.extend(ce.attrs.get("files", []))
-        # the commit's author is recoverable from its raw record
-        raw = ce.raw or {}
-        name = (raw.get("author", {}) or {}).get("name", "").lower()
-        email = (raw.get("author", {}) or {}).get("email", "").lower()
-        blob = f"{name} {email}"
-        if "dependabot" in blob or "renovate" in blob:
-            bot_domains["dependency"] += 1
-        elif "pre-commit-ci" in blob or "github-actions" in blob:
-            bot_domains["ci"] += 1
-        elif "[bot]" in blob:
-            bot_domains["other_bot"] += 1
-        else:
-            human += 1
-
-    total = len(commit_ents)
-    if bot_domains.get("dependency", 0) > total / 2:
-        return "dependency_bumps"
-    if bot_domains.get("ci", 0) > total / 2:
-        return "ci_maintenance"
-
-    if all_files and all(_is_doc(f) for f in all_files):
-        return "documentation"
-
-    return "code_contribution"
-
-
-def segment(shaped: Shaped, corr: Correlation) -> list[ProcessKind]:
+def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFILE) -> list[ProcessKind]:
     entities_by_id = {e.id: e for e in shaped.entities}
-    people = {e.id: e for e in shaped.entities if e.type == "person"}
+    is_bot = {e.id: e.attrs.get("is_bot", False) for e in shaped.entities if e.type == "person"}
+    events_by_id = {e.id: e for e in shaped.events}
 
-    kind_cases: dict[str, list[str]] = defaultdict(list)
+    # --- per-case generic features + optional domain features ---
+    clusters: dict[tuple, list[str]] = defaultdict(list)
+    per_case: dict[str, dict] = {}
     for case in corr.cases.values():
-        commit_ents = [entities_by_id[eid] for eid in case.entity_ids
-                       if eid.startswith("commit:") and eid in entities_by_id]
-        kind_id = _classify(case, commit_ents, people)
-        kind_cases[kind_id].append(case.id)
+        evs = [events_by_id[e] for e in case.event_ids if e in events_by_id]
+        n = len(evs)
+        bot_n = sum(1 for e in evs if e.actor and is_bot.get(e.actor))
+        automated = n > 0 and bot_n > n / 2
+        cf = profile.case_features(case, entities_by_id) or {}
+        per_case[case.id] = {"automated": automated, "events": evs, "cf": cf}
+        # generic structural key: (automated?, correlation anchor). A profile may
+        # refine it (git clusters by its own subkind).
+        generic_key = (automated, case.kind_hint)
+        clusters[profile.cluster_key(generic_key, cf)].append(case.id)
 
+    # --- assemble a ProcessKind per cluster, biggest first (loudest reads first) ---
     kinds: list[ProcessKind] = []
-    for kind_id, case_ids in kind_cases.items():
+    ordered = sorted(clusters.items(), key=lambda kv: -len(kv[1]))
+    for idx, (_key, case_ids) in enumerate(ordered, 1):
+        kf = _aggregate_features(case_ids, per_case, corr, entities_by_id)
+        kid = profile.name_kind(kf) or f"kind_{idx}"
+        display = profile.display_name(kid) or f"Kind {idx}"
+        rationale = profile.rationale(kf) or _data_derived_rationale(kf)
+
         variants, dfg = induced_variants(case_ids, corr.cases)
         steps_seen = sorted({a for v in variants for a in v.signature})
-        kinds.append(ProcessKind(
-            id=kind_id,
-            name=_KIND_NAMES.get(kind_id, kind_id),
-            rationale=_KIND_RATIONALE.get(kind_id, ""),
-            confidence=heuristic("segment boundaries are inferred from actor/files/anchor, not read"),
-            case_ids=case_ids,
-            variants=variants,
-            dfg=dfg,
-            steps=steps_seen,
-        ))
-    # Biggest kinds first — the common processes read loudest.
-    kinds.sort(key=lambda k: -len(k.case_ids))
+        pk = ProcessKind(
+            id=kid, name=display, rationale=rationale,
+            confidence=heuristic("kind boundary inferred by structural clustering, not read"),
+            case_ids=case_ids, variants=variants, dfg=dfg, steps=steps_seen,
+        )
+        pk.features = kf
+        kinds.append(pk)
     return kinds
+
+
+def _aggregate_features(case_ids, per_case, corr, entities_by_id) -> dict:
+    actions: Counter = Counter()
+    etypes: Counter = Counter()
+    automated_votes = 0
+    merged: dict = {}
+    for cid in case_ids:
+        info = per_case[cid]
+        automated_votes += 1 if info["automated"] else 0
+        for e in info["events"]:
+            actions[e.action] += 1
+        for eid in corr.cases[cid].entity_ids:
+            ent = entities_by_id.get(eid)
+            if ent is not None:
+                etypes[ent.type] += 1
+        _merge(merged, info["cf"])
+    kind_hint = Counter(corr.cases[cid].kind_hint for cid in case_ids).most_common(1)[0][0]
+    return {
+        "automated": automated_votes * 2 > len(case_ids),
+        "kind_hint": kind_hint,
+        "n_cases": len(case_ids),
+        "dominant_actions": [a for a, _ in actions.most_common(4)],
+        "entity_types": dict(etypes),
+        **merged,
+    }
+
+
+def _merge(dst: dict, cf: dict) -> None:
+    """Aggregate per-case domain features across a cluster: sum counters, keep
+    the first scalar (constant within a profile-defined cluster)."""
+    for k, v in cf.items():
+        if isinstance(v, dict):
+            dst[k] = Counter(dst.get(k, Counter())) + Counter(v)
+        elif k not in dst:
+            dst[k] = v
+
+
+def _data_derived_rationale(kf: dict) -> str:
+    acts = ", ".join(kf["dominant_actions"]) or "—"
+    types = ", ".join(sorted(kf["entity_types"])) or "—"
+    return (f"{kf['n_cases']} runs · {'automated' if kf['automated'] else 'human-driven'} · "
+            f"anchor: {kf['kind_hint']} · dominant activities: {acts} · touches: {types}. "
+            f"Unnamed data-derived cluster — naming is deferred to a source profile or a human.")

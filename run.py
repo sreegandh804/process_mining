@@ -28,7 +28,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--raw-dir", default="data/raw")
     ap.add_argument("--out-dir", default="out")
     ap.add_argument("--no-thin", action="store_true", help="skip the thin changelog source")
+    ap.add_argument("--profile", choices=["generic", "git", "auto"], default="generic",
+                    help="vocabulary overlay. 'generic' (default): unnamed, source-agnostic "
+                         "kinds/activities. 'git': friendly names for a git corpus. 'auto': "
+                         "pick by source.")
     args = ap.parse_args(argv)
+
+    from induction.profiles import GENERIC_PROFILE, GIT_PROFILE
+    profile = {"generic": GENERIC_PROFILE, "git": GIT_PROFILE, "auto": "auto"}[args.profile]
 
     key = args.slug.replace("/", "__")
     if not Path(args.raw_dir, f"{key}.commits.jsonl").exists():
@@ -40,8 +47,8 @@ def main(argv: list[str] | None = None) -> int:
               f"--slug {args.slug}", file=sys.stderr)
         return 2
 
-    print(f"[run] inducing processes from {args.slug} ...")
-    m = run_pipeline(args.slug, args.raw_dir, with_thin=not args.no_thin)
+    print(f"[run] inducing processes from {args.slug} (profile: {args.profile}) ...")
+    m = run_pipeline(args.slug, args.raw_dir, with_thin=not args.no_thin, profile=profile)
 
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")

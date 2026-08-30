@@ -30,10 +30,13 @@ from induction.adapters import Shaped
 from induction.model import Entity, Event, Observation, direct
 from induction import refs as refs_mod
 
-# Bots produce recurring commits that *look like* a process. We tag them at the
-# source so step 0/§6 can put the look-alikes to the "is this really a process?"
-# test rather than silently rolling them into real work.
-_BOT_MARKERS = ("[bot]", "dependabot", "pre-commit-ci", "github-actions", "renovate")
+# Automated (non-human) actors. We tag them at the source so the generic
+# segmenter can separate machine-driven runs and step 0/§6 can put the
+# look-alikes to the "is this really a process?" test. "noreply@github.com" (no
+# username) is the platform's own web-merge/squash identity — the system acting,
+# not a person; note it does NOT match a real user's "<user>@users.noreply.github.com".
+_BOT_MARKERS = ("[bot]", "dependabot", "pre-commit-ci", "github-actions", "renovate",
+                "noreply@github.com")
 _COAUTHOR = re.compile(r"(?im)^\s*co-authored-by:\s*(.+?)\s*<([^>]+)>\s*$")
 
 

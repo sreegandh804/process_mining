@@ -139,15 +139,38 @@ carries confidence + evidence.
   labelled common / exception / one-off (a revert is an exception by nature). A
   directly-follows graph is included but explicitly caveated as over-generalising.
 
-- **Label (5)** — `steps/label.py`. Names activities from action + object
-  (the LLM upgrade would only replace this). The
+- **Label (5)** — `steps/label.py`. An activity is named by its **raw action**
+  — the label the source itself gave it (`authored`, and for another source
+  `invoice_approved`). No rename table lives in the step. The
   **same-activity-different-people** merge folds a co-authored commit into one
   step with several members, keeping every underlying record.
 
-- **Segment (0)** — `steps/segment.py`. Splits runs into *kinds* — contribution
-  vs release vs dependency-bumps vs CI-maintenance vs docs vs (thin) release
-  notes. Boundaries are inferred (`heuristic`) and revisable; on a single repo
-  the kinds are few and we say so rather than inflating them.
+- **Segment (0)** — `steps/segment.py`. Clusters runs into *kinds* by
+  **structure alone** — automated vs human-driven, and their correlation anchor
+  — and by default leaves them **unnamed** (`kind_1`, `kind_2`, …) with a
+  data-derived rationale. Boundaries are inferred (`heuristic`) and revisable.
+  We do not invent domain names for data we know nothing about.
+
+### Profiles — keeping the engine source-agnostic
+
+The two things that are genuinely domain knowledge — *what activities are
+called* and *which kinds of process exist* — are **not** hardcoded in the shared
+steps. They live in a `Profile` (`induction/profiles.py`) matched to the source:
+
+- **Default (`GENERIC_PROFILE`)** runs on *any* data: activities keep their raw
+  action verb, kinds are the unnamed structural clusters above, and the
+  "looks like a process, isn't" rule is domain-free (a recurring, fully-automated
+  cluster is flagged — it can't prove it "produces nothing" without domain
+  knowledge, and says exactly that).
+- **`GIT_PROFILE`** (opt in with `python run.py --profile git`) overlays friendly
+  names ("Merge pull request", "Dependency bumps") and the git-specific reject
+  rule — **without changing any structure** (tests assert the case/orphan/gap
+  counts are identical either way).
+
+So a new customer is *an adapter + a profile*, and the engine core never learns a
+domain word. This is the fix for the obvious smell — an accounting firm's data
+would get coherent, honestly-**unnamed** kinds today, and real names the moment
+someone writes a 30-line profile for it.
 
 - **Gaps (6)** — `steps/gaps.py`. Off-system steps inferred from real signals and
   rendered as inference: a merged PR presupposes an off-git open + review; an
@@ -243,6 +266,13 @@ Also stated-but-unbuilt (hooks are in place):
   gets states with `order: unknown` and correlation on whatever shared keys
   exist. The thin customer is the one who most needs the honesty machinery, which
   is why the `Observation`/`unknown`/orphan paths are first-class, not fixtures.
+- **A customer that isn't git at all.** The engine core is source-agnostic: it
+  only ever touches `Entity`/`Event`/`Observation`, and all domain vocabulary
+  lives in an adapter + a `Profile` (see above). Point it at a new source with no
+  profile and it still produces a coherent model — with honestly *unnamed* kinds.
+  What is **not** yet built is the set of *other adapters* (Excel/CSV, mail,
+  Slack); each is one adapter away, and the thin end is demonstrated today only
+  via the changelog.
 - **What "actionable" means.** Not a prettier map. A finding is actionable when it
   carries the whole chain: *what actually happens → what it costs → where it
   breaks → what to change → who must agree → whether it worked after.* This engine
@@ -272,6 +302,7 @@ induction/
   model.py           Entity / Event / Observation, Evidence, Confidence (tiers)
   refs.py            cross-reference extraction (+ the tier each kind earns)
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
+  profiles.py        where domain vocabulary lives (generic default; git overlay)
   adapters/          git_history.py (thick), changelog.py (thin)
   steps/             segment, correlate, order, variants, label, gaps
   honesty.py         orphans, reject, (unknowns/divergence surfaced in emit)

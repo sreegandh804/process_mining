@@ -51,6 +51,11 @@ def build_model(m: InducedModel) -> dict:
         "meta": {
             "slug": m.slug,
             "manifest": m.manifest,
+            "profile": m.profile_id,
+            "profile_note": ("Kinds and activities are named by the '%s' vocabulary. "
+                             "The 'generic' default leaves them unnamed (kind_1, …) with "
+                             "data-derived rationales — structure is identical either way."
+                             % m.profile_id),
             "tier_legend": TIER_LEGEND,
             "what_it_cannot_conclude": DISCLAIMERS,
             "stats": _stats(m),

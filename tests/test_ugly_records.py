@@ -37,9 +37,21 @@ def test_snapshot_with_no_timestamp_is_unknown_not_fabricated(mini_model):
 
 
 def test_look_alike_non_process_is_rejected_with_a_reason(mini_model):
-    """A dependabot bump moves no product artefact — 'looks like a process, isn't'."""
-    dep = next(k for k in mini_model.kinds if k.id == "dependency_bumps")
-    assert dep.rejected is True
-    assert dep.reject_reason and "isn't" in dep.reject_reason.lower()
+    """A recurring, fully-automated cluster (the bot bumps) is flagged
+    'looks like a process, isn't' — by the GENERIC default rule, with no git
+    knowledge, purely from 'every run is automated and it recurs'."""
+    rejected = [k for k in mini_model.kinds if k.rejected]
+    assert rejected, "the recurring automated cluster should be flagged"
+    r = rejected[0]
+    assert r.reject_reason and "isn't" in r.reject_reason.lower()
+    assert r.features.get("automated") is True
     # rejected, but NOT deleted — still fully inspectable
-    assert dep.case_ids
+    assert r.case_ids
+
+
+def test_reject_needs_recurrence_not_just_automation(mini_model):
+    """Honesty guard: a single automated run is not 'a process' — the generic
+    rule only flags automation that actually *recurs*."""
+    for k in mini_model.kinds:
+        if k.rejected:
+            assert k.features["n_cases"] > 1
