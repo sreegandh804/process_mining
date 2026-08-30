@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from induction.adapters import Shaped
+from induction.links import Link, declare
 from induction.model import Confidence, Entity, Evidence, Event, Observation, Tier, direct, heuristic
 
 _BOT_ACTORS = ("system", "auto", "automated", "bot", "robot", "batch")
@@ -194,7 +195,7 @@ def _shape_row(spec, row, rownum, locator, people, seen_ids, out: Shaped) -> Non
 
     existing = next((e for e in out.entities if e.id == ent_id), None)
     if existing is None:
-        out.entities.append(Entity(
+        entity = Entity(
             id=ent_id, source=spec.source, type=spec.entity_type,
             attrs={
                 **{c: row.get(c, "") for c in spec.attr_columns},
@@ -205,7 +206,31 @@ def _shape_row(spec, row, rownum, locator, people, seen_ids, out: Shaped) -> Non
             confidence=direct(),
             evidence=[Evidence(spec.source, locator, snippet)],
             raw=dict(row),
+        )
+        # A foreign key is a declared link like any other — the same shape a
+        # commit's "(#123)" or a mail header produces, resolved by the same
+        # correlator. The referenced row *anchors* the run (a payment belongs to
+        # its invoice, not the other way round). Nothing is materialised: a
+        # dangling invoice_id is a data-quality finding, not licence to invent
+        # the invoice it points at.
+        # A row with an identity key is a run in its own right — an invoice
+        # owns "raised -> approved -> paid" whether or not anything points at
+        # it. Declared at a weak anchor rank so that when something *does* point
+        # at it, the pointed-at record names the run (the payment belongs to the
+        # invoice, not the reverse).
+        declare(entity, Link(
+            target=ent_id, method="row-identity", tier=Tier.DIRECT,
+            rationale="row carries its own identity key and owns the records on it",
+            locator=locator, snippet=snippet, anchors=True, anchor_rank=5,
         ))
+        for ref in refs:
+            declare(entity, Link(
+                target=f"{ref['type']}:{ref['key']}", method="foreign-key",
+                tier=Tier.JOINED,
+                rationale="records share a row identity / foreign key",
+                locator=locator, snippet=snippet, anchors=True,
+            ))
+        out.entities.append(entity)
     else:
         existing.attrs["n_rows"] += 1
         existing.attrs["duplicate_id"] = True   # two rows claim the same identity

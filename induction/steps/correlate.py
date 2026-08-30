@@ -1,327 +1,479 @@
-"""Step 2 — Correlate: group events into cases (process instances).
+"""Step 2 — Correlate: group records into cases (process instances).
 
-This is the weak claim, so it gets the most care. We form cases with **only
-deterministic joins**, layered strongest-first, and we score *every* link:
+**One correlator, every source.** This is the weakest claim the engine makes, so
+it gets the most care — and the care would be worthless if each source got its
+own copy of it. Adapters declare `Link`s (see `induction/links.py`); this module
+resolves them. It contains no source name, no commit, no invoice, no email.
 
-  1. Merge topology  (tier `joined`) — a "Merge pull request #N" commit owns the
-     commits it brought onto the trunk. This uses the real git DAG, so it is a
-     structural key, not a guess. It recovers genuine *multi-commit* runs that a
-     text-only join would scatter into orphans.
-  2. Squash subject  (tier `joined`) — a lone trunk commit ending "(#N)".
-  3. Issue keyword   (tier `joined`) / bare mention (tier `heuristic`) — attaches
-     an issue to a PR run, or anchors a case when there is no PR.
-  4. Branch merge    (tier `joined`) — "Merge branch 'stable'" integration
-     commits anchor the release/backport process; they do NOT absorb history.
+Two layers, and the difference between them is the whole point:
 
-What remains unjoined stays unjoined: it becomes an orphan (§6), never padded
-into a case. A deliberately ambiguous reference (a bare "#N") is joined *with
-low confidence*, not silently.
+1. **Deterministic** (`joined`) — a link the data itself asserts: a merge that
+   says it closed PR #1, a foreign-key column, a mail ``In-Reply-To``. Resolved
+   strongest-tier-first so a record lands in the best-evidenced case available,
+   and first-claim-wins so the reason recorded against it is its strongest one.
 
-Where the deterministic baseline visibly breaks — a follow-up commit that
-belongs to a PR but shares no key, two records that are the same activity with
-no shared id — is exactly where the documented upgrade path (fuzzy reference /
-actor+time proximity / embeddings) would go. That is deliberately not built;
-see README. The point of scoring every link is that a future fuzzy join shows
-up as `heuristic`, distinguishable at a glance from the `joined` spine.
+2. **Fuzzy** (`heuristic`) — records with **no shared key at all**, joined on
+   text similarity *plus* actor-or-time proximity. This is what a git DAG or a
+   foreign key lets you dodge, and what an email/document corpus is made of. It
+   is deliberately the *second* pass: it only ever sees what determinism could
+   not explain, so it can never override a real key. Every fuzzy link records
+   its score and the exact tokens it matched on, so it reads as the inference it
+   is and a reader can overrule it.
+
+What joins to nothing stays joined to nothing — it becomes an orphan (§6), never
+padded into a case to make the output look tidier.
+
+A link whose target never appears is resolved three ways, chosen by the adapter
+because only the adapter knows which is true:
+  * ``materialise`` — the thing is real, we just never saw its record. Create it
+    as an *inferred* entity (its existence is then legible as inference, and its
+    empty timeline becomes a gap in step 6).
+  * ``virtual`` — the target is a case identity, not a thing ("this version's
+    release notes", "this backport run"). It names the case without inventing an
+    entity to hang it on.
+  * neither — an unresolved reference, recorded on the source record as a
+    reconciliation finding. Never silently dropped.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from collections import defaultdict
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Optional
 
 from induction.adapters import Shaped
-from induction.model import Confidence, Entity, Evidence, Event, Tier, joined, heuristic
+from induction.links import Link, links_of, record_unresolved
+from induction.model import Confidence, Entity, Evidence, Event, heuristic
 from induction.process import Case
+from induction.text import Similarity, TokenStats, similar
 
 
 @dataclass
 class Correlation:
     cases: dict[str, Case] = field(default_factory=dict)
-    # events left with case_id=None are orphans; the honesty step collects them.
+    # records left with case_id=None are orphans; the honesty step collects them.
 
     def case_of(self, event: Event) -> Optional[Case]:
         return self.cases.get(event.case_id) if event.case_id else None
 
 
-def correlate(shaped: Shaped, slug: str) -> Correlation:
-    source = f"git:{slug}"
-    commits = {e.id: e for e in shaped.entities if e.type == "commit"}
-    sha_of = {e.id: e.raw["sha"] for e in commits.values()}
-    id_by_sha = {sha: eid for eid, sha in sha_of.items()}
-    events_by_entity: dict[str, list[Event]] = defaultdict(list)
-    for ev in shaped.events:
-        events_by_entity[ev.entity_id].append(ev)
+@dataclass(frozen=True)
+class FuzzyPolicy:
+    """When two records with no shared key may be treated as the same run.
 
-    parents_by_sha = {sha_of[eid]: c.attrs.get("parents", []) for eid, c in commits.items()}
-    present = set(parents_by_sha)  # shas we actually ingested (shallow boundary)
+    Every knob is a *threshold*, not a branch: there is no per-source code path
+    here. Defaults are conservative — the fuzzy pass should recover the joins a
+    key-based one visibly misses, not manufacture a tidy-looking process.
+    """
 
-    corr = Correlation()
-    assigned: dict[str, str] = {}  # commit entity id -> case id
-    inferred_entities: dict[str, Entity] = {}
+    enabled: bool = True
+    # Attribute names the fuzzy pass will read text from, tried in order. Any
+    # adapter can populate one; none is required to.
+    text_attrs: tuple[str, ...] = (
+        "title", "subject", "summary", "memo", "description", "text", "name",
+    )
+    min_score: float = 0.30
+    min_shared_tokens: int = 1
+    # Proximity is the second half of the evidence: similar text alone is a
+    # topic, not a case. Same actor, or opened within this window.
+    require_proximity: bool = True
+    proximity_days: int = 30
+    # A record joins at most one fuzzy partner: chains of guesses compound into
+    # a mega-case that no single link would justify.
+    cross_source_only: bool = False
 
-    trunk = _first_parent_trunk(commits, id_by_sha, sha_of, parents_by_sha, present)
-    # A PR's branch walk must stop when it reaches *another* PR's anchor commit —
-    # those commits belong to that PR, not this one. This is what keeps a release
-    # branch (which is full of merged PRs) from being swallowed whole.
-    pr_anchor_shas = {
-        sha_of[eid] for eid, ent in commits.items()
-        if any(r["kind"] == "pr" and r["via"] in ("merge-pull-request", "squash-subject")
-               for r in ent.attrs.get("references", []))
+
+@dataclass(frozen=True)
+class CorrelationPolicy:
+    """Declarative knobs. Data, not code — the reason a new source needs neither."""
+
+    # Types that are never process instances in their own right (an actor is not
+    # a run). Adapters mark them; the correlator just honours the list.
+    skip_types: frozenset[str] = frozenset({"person", "orphan_row"})
+    fuzzy: FuzzyPolicy = FuzzyPolicy()
+
+
+DEFAULT_POLICY = CorrelationPolicy()
+
+
+# ---------------------------------------------------------------------------
+# The correlator
+# ---------------------------------------------------------------------------
+
+def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correlation:
+    policy = policy or DEFAULT_POLICY
+    entities: dict[str, Entity] = {
+        e.id: e for e in shaped.entities if e.type not in policy.skip_types
     }
+    events_by_entity: dict[str, list] = defaultdict(list)
+    obs_by_entity: dict[str, list] = defaultdict(list)
+    for ev in shaped.events:
+        if ev.entity_id in entities:
+            events_by_entity[ev.entity_id].append(ev)
+    for ob in shaped.observations:
+        if ob.entity_id in entities:
+            obs_by_entity[ob.entity_id].append(ob)
 
-    # ---- pass 1: merge-pull-request topology (strongest structural join) ----
-    # Process merges so that a commit lands in the *nearest* PR that introduced
-    # it. Iterating in file order (newest first) and skipping already-assigned
-    # commits gives that determinism.
-    for eid, ent in commits.items():
-        if not ent.attrs.get("is_merge"):
-            continue
-        pr_refs = [r for r in ent.attrs.get("references", []) if r["kind"] == "pr"
-                   and r["via"] == "merge-pull-request"]
-        if not pr_refs:
-            continue
-        number = pr_refs[0]["number"]
-        subject = ent.attrs.get("subject", "")
-        branch, overflowed = _branch_commits(
-            eid, sha_of, id_by_sha, parents_by_sha, present, trunk, assigned, pr_anchor_shas,
-        )
-        if overflowed:
-            # A "PR" that introduces more commits than any single contribution
-            # plausibly does is a release/integration train. We say so — as a
-            # *heuristic* judgement (a size threshold, not a structural fact) —
-            # rather than asserting a 1000-commit "process instance".
-            looks_release = "release" in subject.lower() or "release" in (ent.attrs.get("merge_branch") or "").lower()
-            case = _ensure_case(
-                corr, f"case:release:{number}" if looks_release else f"case:integration:pr:{number}",
-                "release" if looks_release else "integration",
-                {"type": "release" if looks_release else "integration", "pr": number},
-                heuristic(f"merge #{number} introduces >{_ABSORB_CAP} commits — treated as a "
-                          f"release/integration train, not one contribution run"),
-                Evidence(source, sha_of[eid], subject),
-            )
-            _place(eid, case, assigned, corr, events_by_entity, commits,
-                   heuristic("oversized merge reclassified as integration"), sha_of, source)
-            continue
-        case = _ensure_case(
-            corr, f"case:pr:{number}", "pr", {"type": "pr", "number": number},
-            joined("commit is the 'Merge pull request' commit for this PR"),
-            Evidence(source, sha_of[eid], subject),
-        )
-        _materialise_pr(inferred_entities, source, number, sha_of[eid], subject, "joined")
-        for member_eid in branch:
-            if member_eid in assigned:
+    graph = _Components()
+    for eid in entities:
+        graph.add(eid)
+
+    materialised: dict[str, Entity] = {}
+    # A "virtual" node is a case identity with no entity behind it — the notes
+    # for a version, one backport run. It anchors and names, but is not a thing.
+    virtual: dict[str, Link] = {}
+    anchor_claims: dict[str, Link] = {}      # node id -> the link that named it
+    attach: dict[str, Confidence] = {}       # entity id -> why it is in its case
+
+    def resolve(source_id: str, link: Link) -> Optional[str]:
+        """Find (or legitimately invent) the node a link points at."""
+        if link.target in entities or link.target in virtual:
+            return link.target
+        if link.materialise:
+            ent = _materialise(link, entities[source_id].source)
+            entities[ent.id] = ent
+            materialised[ent.id] = ent
+            graph.add(ent.id)
+            return ent.id
+        if link.virtual:
+            virtual[link.target] = link
+            graph.add(link.target)
+            return link.target
+        # Nothing to point at and nothing the adapter says we may invent: a
+        # dangling reference is a reconciliation finding, not a silent drop.
+        record_unresolved(entities[source_id], link)
+        return None
+
+    def apply(source_id: str, link: Link) -> None:
+        if link.target == source_id:
+            # A self-link is an adapter saying "this record is a run in its own
+            # right" — an invoice owns its lifecycle; a commit does not own one.
+            # Nothing to union, but it does license a case to exist.
+            if link.anchors:
+                anchor_claims.setdefault(source_id, link)
+                attach.setdefault(source_id, link.confidence)
+            return
+        target = resolve(source_id, link)
+        if target is None:
+            return
+        graph.union(source_id, target)
+        # First claim wins, and claims arrive strongest-first, so a record keeps
+        # the strongest reason it has for being where it is.
+        attach.setdefault(source_id, link.confidence)
+        if link.anchors:
+            anchor_claims.setdefault(target, link)
+
+    # ---- pass 1: deterministic links, strongest tier first ----------------
+    declared: list[tuple[str, Link]] = [
+        (eid, link) for eid, ent in entities.items() for link in links_of(ent)
+    ]
+    firm = [(eid, l) for eid, l in declared if not l.fallback]
+    firm.sort(key=lambda pair: -int(pair[1].tier))   # stable: declaration order within a tier
+    for eid, link in firm:
+        apply(eid, link)
+
+    # ---- pass 2: fallback links, only for what nothing has claimed --------
+    # Eager application would fuse every real case containing one leftover into
+    # a single mega-case, so these wait until the firm links have settled.
+    for eid, link in [(e, l) for e, l in declared if l.fallback]:
+        if graph.size(eid) == 1:
+            apply(eid, link)
+
+    # ---- pass 3: fuzzy — no shared key, so text + proximity or nothing ----
+    fuzzy_links: list[tuple[str, str, Confidence]] = []
+    if policy.fuzzy.enabled:
+        fuzzy_links = _fuzzy_pass(policy.fuzzy, entities, events_by_entity,
+                                  obs_by_entity, graph)
+        for a, b, conf in fuzzy_links:
+            graph.union(a, b)
+            attach.setdefault(a, conf)
+            attach.setdefault(b, conf)
+            # A fuzzy pair is a run nobody declared, so it must license its own
+            # case — but at the weakest anchor rank there is, so any real claim
+            # in the component names it instead.
+            claim = Link(target=a, method="fuzzy-match", tier=conf.tier,
+                         rationale=conf.rationale or "", anchors=True, anchor_rank=9)
+            anchor_claims.setdefault(a, claim)
+            anchor_claims.setdefault(b, replace(claim, target=b))
+
+    # ---- assemble ---------------------------------------------------------
+    shaped.entities.extend(materialised.values())
+    return _build_cases(graph, entities, virtual, anchor_claims, attach,
+                        events_by_entity, obs_by_entity, policy)
+
+
+# ---------------------------------------------------------------------------
+# Union-find over "nodes" (entities plus virtual case identities)
+# ---------------------------------------------------------------------------
+
+class _Components:
+    def __init__(self) -> None:
+        self._parent: dict[str, str] = {}
+        self._size: dict[str, int] = {}
+
+    def add(self, node: str) -> None:
+        self._parent.setdefault(node, node)
+        self._size.setdefault(node, 1)
+
+    def find(self, node: str) -> str:
+        self.add(node)
+        root = node
+        while self._parent[root] != root:
+            self._parent[root] = self._parent[self._parent[root]]
+            root = self._parent[root]
+        return root
+
+    def union(self, a: str, b: str) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        self._parent[ra] = rb
+        self._size[rb] = self._size[rb] + self._size[ra]
+
+    def size(self, node: str) -> int:
+        return self._size[self.find(node)]
+
+    def groups(self, order: list[str]) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = defaultdict(list)
+        for node in order:
+            out[self.find(node)].append(node)
+        return out
+
+
+def _materialise(link: Link, source: str) -> Entity:
+    """An entity we never saw a record for, but a link asserts exists.
+
+    Marked inferred with the link's own tier and evidence, so its existence
+    reads as the inference it is — and so step 6 can flag its empty timeline.
+    """
+    attrs = {"known_via": "reference", **(link.materialise_attrs or {})}
+    return Entity(
+        id=link.target, source=source, type=link.materialise, attrs=attrs,
+        confidence=Confidence(link.tier,
+                              f"existence inferred from a reference ({link.method}); "
+                              f"no direct record in {source}"),
+        evidence=[Evidence(source, link.locator or link.target, link.snippet)],
+    )
+
+
+# ---------------------------------------------------------------------------
+# The fuzzy pass
+# ---------------------------------------------------------------------------
+
+def _fuzzy_pass(policy: FuzzyPolicy, entities, events_by_entity, obs_by_entity,
+                graph) -> list[tuple[str, str, Confidence]]:
+    """Join records that share no key, on text similarity + actor/time proximity.
+
+    Only records that carry their own timeline (events or observations) and that
+    determinism left unexplained are candidates — the fuzzy pass never second-
+    guesses a real key, and never invents a case out of two bare references.
+
+    Greedy best-first with each record taking at most one partner: chains of
+    guesses compound into a mega-case that no single link would justify.
+    """
+    candidates = [
+        eid for eid, ent in entities.items()
+        if graph.size(eid) == 1
+        and (events_by_entity.get(eid) or obs_by_entity.get(eid))
+        and _text_of(ent, policy.text_attrs)
+    ]
+    if len(candidates) < 2:
+        return []
+
+    # Rarity is measured over the candidate pool itself — the honest scope, and
+    # what stops shared boilerplate ("invoice", "fix") from carrying a join.
+    stats = TokenStats()
+    for eid in candidates:
+        stats.add(_text_of(entities[eid], policy.text_attrs))
+
+    scored: list[tuple[float, str, str, Similarity, str]] = []
+    for i, a in enumerate(candidates):
+        for b in candidates[i + 1:]:
+            ea, eb = entities[a], entities[b]
+            if policy.cross_source_only and ea.source == eb.source:
                 continue
-            _place(member_eid, case, assigned, corr, events_by_entity, commits,
-                   joined("reachable from the PR merge but not from the trunk it merged into"),
-                   sha_of, source)
-        # the merge commit itself belongs to the case, as a `joined` structural fact
-        _place(eid, case, assigned, corr, events_by_entity, commits,
-               joined("this is the merge commit that closed the PR"), sha_of, source)
+            sim = similar(_text_of(ea, policy.text_attrs),
+                          _text_of(eb, policy.text_attrs), stats)
+            if sim.score < policy.min_score or len(sim.shared) < policy.min_shared_tokens:
+                continue
+            why = _proximity(a, b, events_by_entity, obs_by_entity, policy)
+            if policy.require_proximity and why is None:
+                continue
+            scored.append((sim.score, a, b, sim, why or "no proximity signal"))
 
-    # ---- pass 2: squash-subject "(#N)" on still-unassigned trunk commits ----
-    for eid, ent in commits.items():
-        if eid in assigned:
+    scored.sort(key=lambda t: (-t[0], t[1], t[2]))   # best first, deterministic ties
+    taken: set[str] = set()
+    out: list[tuple[str, str, Confidence]] = []
+    for score, a, b, sim, why in scored:
+        if a in taken or b in taken:
             continue
-        pr_refs = [r for r in ent.attrs.get("references", []) if r["kind"] == "pr"
-                   and r["via"] == "squash-subject"]
-        if not pr_refs:
+        taken.add(a)
+        taken.add(b)
+        out.append((a, b, heuristic(
+            f"no shared key; text overlap {score:.2f} on {sim.describe()}, and {why}"
+        )))
+    return out
+
+
+def _text_of(entity, attrs: tuple[str, ...]) -> str:
+    """The first populated text attribute — adapters choose what to expose."""
+    for name in attrs:
+        val = entity.attrs.get(name)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
+def _when_who(eid, events_by_entity, obs_by_entity) -> tuple[Optional[datetime], Optional[str]]:
+    """The earliest moment we can see this record, and who was behind it."""
+    best_ts, actor = None, None
+    for ev in events_by_entity.get(eid, []):
+        ts = _dt(ev.timestamp)
+        if ts is not None and (best_ts is None or ts < best_ts):
+            best_ts, actor = ts, ev.actor or actor
+        elif actor is None:
+            actor = ev.actor
+    if best_ts is None:
+        for ob in obs_by_entity.get(eid, []):
+            ts = _dt(ob.seen_at)
+            if ts is not None and (best_ts is None or ts < best_ts):
+                best_ts = ts
+    return best_ts, actor
+
+
+def _proximity(a, b, events_by_entity, obs_by_entity, policy: FuzzyPolicy) -> Optional[str]:
+    """Same person, or close enough in time — the half that turns topic into case."""
+    ta, aa = _when_who(a, events_by_entity, obs_by_entity)
+    tb, ab = _when_who(b, events_by_entity, obs_by_entity)
+    if aa and ab and aa == ab:
+        return f"same actor ({aa.split(':')[-1]})"
+    if ta is not None and tb is not None:
+        days = abs((ta - tb).days)
+        if days <= policy.proximity_days:
+            return f"{days} days apart"
+    return None
+
+
+def _dt(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Case assembly
+# ---------------------------------------------------------------------------
+
+def _build_cases(graph, entities, virtual, anchor_claims, attach,
+                 events_by_entity, obs_by_entity, policy) -> Correlation:
+    order = list(entities) + list(virtual)
+    corr = Correlation()
+
+    for members in graph.groups(order).values():
+        real = [m for m in members if m in entities]
+        has_records = any(events_by_entity.get(m) or obs_by_entity.get(m) for m in real)
+        if not has_records:
+            continue        # a cluster of bare references is not a run
+        if not any(m in anchor_claims for m in members):
+            # Nothing declared this a process instance: no link claimed it, it
+            # claimed nothing, and no fuzzy pass could place it. A lone record is
+            # then an *orphan*, not a one-step "process" — padding the output
+            # with singleton cases is exactly the dishonesty §6 exists to stop.
             continue
-        number = pr_refs[0]["number"]
-        case = _ensure_case(
-            corr, f"case:pr:{number}", "pr", {"type": "pr", "number": number},
-            joined("squash-merge subject carries the PR number"),
-            Evidence(source, sha_of[eid], ent.attrs.get("subject")),
+
+        anchor_id = _pick_anchor(members, entities, virtual, anchor_claims,
+                                 events_by_entity, obs_by_entity)
+        anchor_link = anchor_claims.get(anchor_id)
+        case = Case(
+            id=f"case:{anchor_id}",
+            kind_hint=_kind_of(anchor_id, entities, anchor_link),
+            anchor=_anchor_attrs(anchor_id, entities, anchor_link),
+            confidence=_case_confidence(members, anchor_id, anchor_claims, attach),
         )
-        _materialise_pr(inferred_entities, source, number, sha_of[eid], ent.attrs.get("subject"), "joined")
-        _place(eid, case, assigned, corr, events_by_entity, commits,
-               joined("squash-merge subject '(#%d)'" % number), sha_of, source)
+        corr.cases[case.id] = case
 
-    # ---- pass 3: issue references ----
-    # An issue on a commit already in a PR case *enriches* that case (the PR
-    # addresses the issue); an issue on an otherwise-unassigned commit *anchors*
-    # a case of its own.
-    for eid, ent in commits.items():
-        issue_refs = [r for r in ent.attrs.get("references", []) if r["kind"] == "issue"]
-        if not issue_refs:
-            continue
-        for r in issue_refs:
-            number = r["number"]
-            iss_id = f"issue:{slug}:{number}"
-            tier_label = r["tier"]
-            _materialise_issue(inferred_entities, source, slug, number, sha_of[eid],
-                               r["snippet"], tier_label)
-            if eid in assigned:
-                case = corr.cases[assigned[eid]]
-                if iss_id not in case.entity_ids:
-                    case.entity_ids.append(iss_id)
-                    case.evidence.append(Evidence(source, sha_of[eid], r["snippet"]))
-            else:
-                conf = joined("issue-closing keyword") if tier_label == "joined" \
-                    else heuristic("bare '#%d' mention — a reference, not a proven link" % number)
-                case = _ensure_case(
-                    corr, f"case:issue:{slug}:{number}", "issue",
-                    {"type": "issue", "number": number}, conf,
-                    Evidence(source, sha_of[eid], r["snippet"]),
-                )
-                _place(eid, case, assigned, corr, events_by_entity, commits, conf, sha_of, source)
-
-    # ---- pass 4: "Merge branch 'X'" integration commits (release spine) ----
-    for eid, ent in commits.items():
-        if eid in assigned:
-            continue
-        branch_name = ent.attrs.get("merge_branch")
-        if not branch_name:
-            continue
-        # Each integration merge is its OWN run — lumping every "Merge branch
-        # 'stable'" into one case would invent a single 15-step "instance" that
-        # never happened. One backport = one run.
-        case = _ensure_case(
-            corr, f"case:integration:{branch_name}:{sha_of[eid][:8]}", "integration",
-            {"type": "integration", "branch": branch_name, "sha": sha_of[eid][:8]},
-            joined("integration merge of branch '%s'" % branch_name),
-            Evidence(source, sha_of[eid], ent.attrs.get("subject")),
-        )
-        _place(eid, case, assigned, corr, events_by_entity, commits,
-               joined("integration merge commit"), sha_of, source)
-
-    # ---- pass 5: attach a release tag to the run of the commit it points at ----
-    for ent in list(shaped.entities):
-        if ent.type != "release":
-            continue
-        commit_eid = id_by_sha.get(ent.attrs.get("commit", ""))
-        if commit_eid and commit_eid in assigned:
-            case = corr.cases[assigned[commit_eid]]
-            if ent.id not in case.entity_ids:
-                case.entity_ids.append(ent.id)
-            for ev in events_by_entity.get(ent.id, []):
+        for m in real:
+            evs, obs = events_by_entity.get(m, []), obs_by_entity.get(m, [])
+            link_conf = attach.get(m) or case.confidence
+            if m not in case.entity_ids:
+                case.entity_ids.append(m)
+            for ev in evs:
                 ev.case_id = case.id
-                ev.case_confidence = joined("release tags a commit that belongs to this run")
+                ev.case_confidence = link_conf
                 if ev.id not in case.event_ids:
                     case.event_ids.append(ev.id)
-
-    shaped.entities.extend(inferred_entities.values())
+            for ob in obs:
+                ob.case_id = case.id
+                ob.case_confidence = link_conf
+            ent = entities[m]
+            if ent.evidence and ent.evidence[0] not in case.evidence:
+                case.evidence.append(ent.evidence[0])
     return corr
 
 
-# ---------------------------------------------------------------------------
-# DAG helpers
-# ---------------------------------------------------------------------------
-def _first_parent_trunk(commits, id_by_sha, sha_of, parents_by_sha, present) -> set[str]:
-    """The mainline: follow first-parent from HEAD. A PR merge's branch commits
-    are precisely those reachable from its 2nd parent that are NOT on this trunk,
-    so knowing the trunk lets us bound each branch walk to the branch itself."""
-    head_sha = None
-    for eid, ent in commits.items():
-        if any("HEAD" in r for r in ent.attrs.get("refs", [])):
-            head_sha = sha_of[eid]
-            break
-    if head_sha is None and commits:
-        # commits.jsonl is newest-first; the first entity is the tip.
-        head_sha = next(iter(commits.values())).raw["sha"]
-    trunk: set[str] = set()
-    cur = head_sha
-    while cur and cur in present and cur not in trunk:
-        trunk.add(cur)
-        parents = parents_by_sha.get(cur, [])
-        cur = parents[0] if parents else None
-    return trunk
+def _pick_anchor(members, entities, virtual, anchor_claims, events_by_entity,
+                 obs_by_entity) -> str:
+    """Which member names the run.
 
-
-# A PR branch above this size is not one contribution run; the walk gives up and
-# the caller reclassifies it as an integration/release train. Generous on
-# purpose — real feature PRs sit well under it.
-_ABSORB_CAP = 60
-
-
-def _branch_commits(merge_eid, sha_of, id_by_sha, parents_by_sha, present, trunk,
-                    assigned, pr_anchor_shas) -> tuple[list[str], bool]:
-    """Commits introduced by a PR merge = reachable from its 2nd+ parents,
-    stopping at: the trunk (where the branch forked), already-assigned commits,
-    and *other* PR anchor commits (which belong to those PRs). Bounded to the
-    branch, so it stays cheap even over long history.
-
-    Returns ``(commits, overflowed)``. ``overflowed`` is True when the walk blew
-    past ``_ABSORB_CAP`` — the signal that this is not a normal PR.
+    A run of commits is "PR #1", not "commit f1"; a payment run is the invoice,
+    not the payment. Adapters mark the candidates (``anchors=True``) and rank
+    them (``anchor_rank``) because which end of a link names a run is domain
+    knowledge. Everything below that is mechanical tie-breaking, so the
+    correlator can stay ignorant of what any of these records are.
     """
-    merge_sha = sha_of[merge_eid]
-    parents = parents_by_sha.get(merge_sha, [])
-    if len(parents) < 2:
-        return [], False
-    out: list[str] = []
-    seen: set[str] = set()
-    queue = deque(p for p in parents[1:] if p in present)
-    while queue:
-        sha = queue.popleft()
-        if sha in seen or sha in trunk:
-            continue
-        seen.add(sha)
-        eid = id_by_sha.get(sha)
-        if eid is None:
-            continue
-        if eid in assigned:
-            continue                       # already owned by a nearer PR
-        if sha in pr_anchor_shas and sha != merge_sha:
-            continue                       # boundary: belongs to another PR
-        out.append(eid)
-        if len(out) > _ABSORB_CAP:
-            return out, True
-        for p in parents_by_sha.get(sha, []):
-            if p in present and p not in trunk and p not in seen:
-                queue.append(p)
-    return out, False
+    claimed = [m for m in members if m in anchor_claims]
+    pool = claimed or members
+
+    def rank(node: str):
+        link = anchor_claims.get(node)
+        records = len(events_by_entity.get(node, [])) + len(obs_by_entity.get(node, []))
+        return (
+            link.anchor_rank if link is not None else 99,   # the adapter's judgement
+            0 if node in virtual or node not in entities else 1,  # identity over record
+            -records,                                        # then weight of evidence
+            node,                                            # then id, for determinism
+        )
+
+    return min(pool, key=rank)
 
 
-# ---------------------------------------------------------------------------
-# case assembly
-# ---------------------------------------------------------------------------
-def _ensure_case(corr, case_id, kind_hint, anchor, confidence, ev) -> Case:
-    case = corr.cases.get(case_id)
-    if case is None:
-        case = Case(id=case_id, kind_hint=kind_hint, anchor=anchor, confidence=confidence)
-        corr.cases[case_id] = case
-    if ev is not None and ev not in case.evidence:
-        case.evidence.append(ev)
-    return case
+def _kind_of(node: str, entities, link: Link | None) -> str:
+    ent = entities.get(node)
+    if ent is not None:
+        return ent.type
+    if link is not None and link.materialise:
+        return link.materialise
+    return node.split(":", 1)[0]
 
 
-def _place(commit_eid, case, assigned, corr, events_by_entity, commits, link_conf, sha_of, source) -> None:
-    """Attach a commit (and all its events) to a case, scoring the case link."""
-    assigned[commit_eid] = case.id
-    if commit_eid not in case.entity_ids:
-        case.entity_ids.append(commit_eid)
-    for ev in events_by_entity.get(commit_eid, []):
-        ev.case_id = case.id
-        ev.case_confidence = link_conf
-        if ev.id not in case.event_ids:
-            case.event_ids.append(ev.id)
+def _anchor_attrs(node: str, entities, link: Link | None) -> dict:
+    if link is not None and link.anchor_attrs:
+        return dict(link.anchor_attrs)
+    ent = entities.get(node)
+    node_type = _kind_of(node, entities, link)
+    attrs = {"type": node_type, "key": node.split(":", 1)[1] if ":" in node else node}
+    if ent is not None and "number" in ent.attrs:
+        attrs["number"] = ent.attrs["number"]
+    return attrs
 
 
-def _materialise_pr(store, source, number, locator, snippet, tier_label) -> None:
-    """A PR we never saw directly — known only because a commit references it.
-    Recorded as an inferred entity so its very existence is legible as inference,
-    and so step 6 can flag its (entirely off-git) timeline as a gap."""
-    ent_id = f"pr:{number}"
-    if ent_id in store:
-        return
-    store[ent_id] = Entity(
-        id=ent_id, source=source, type="pr",
-        attrs={"number": number, "known_via": "reference", "timeline": "off-git"},
-        confidence=Confidence(Tier.from_label(tier_label),
-                              "existence inferred from a commit reference; no direct PR record in git"),
-        evidence=[Evidence(source, locator, snippet)],
-    )
+def _case_confidence(members, anchor_id, anchor_claims, attach) -> Confidence:
+    """How sure we are this run exists at all.
 
-
-def _materialise_issue(store, source, slug, number, locator, snippet, tier_label) -> None:
-    ent_id = f"issue:{slug}:{number}"
-    if ent_id in store:
-        return
-    store[ent_id] = Entity(
-        id=ent_id, source=source, type="issue",
-        attrs={"number": number, "known_via": "reference", "timeline": "off-git"},
-        confidence=Confidence(Tier.from_label(tier_label),
-                              "existence inferred from a commit reference; no direct issue record in git"),
-        evidence=[Evidence(source, locator, snippet)],
-    )
+    The link that *named* the case is the claim that it is a run, so that is the
+    confidence reported — and where several members were attached by weaker
+    links, the case cannot be stronger than its weakest member. Weakest-link is
+    the same rule `Confidence.weakest` applies to any chain of inference.
+    """
+    named = anchor_claims.get(anchor_id)
+    tiers = [attach[m] for m in members if m in attach]
+    if named is not None:
+        floor = min([named.confidence] + tiers, key=lambda c: c.tier)
+        return named.confidence if floor.tier >= named.tier else floor
+    if tiers:
+        return min(tiers, key=lambda c: c.tier)
+    return heuristic("records grouped with no declared link")

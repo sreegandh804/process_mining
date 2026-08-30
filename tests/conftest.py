@@ -132,8 +132,7 @@ def mini_shaped(mini_raw):
     raw_dir, slug = mini_raw
     shaped = git_history.load(raw_dir, slug)
     shaped.extend(changelog.load(raw_dir, slug))
-    corr = correlate(shaped, slug)
-    changelog.correlate_thin(shaped, corr, slug)
+    corr = correlate(shaped)
     order(shaped, corr)
     order_observations(shaped.observations, corr)
     return shaped, corr, slug

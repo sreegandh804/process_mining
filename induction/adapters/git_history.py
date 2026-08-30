@@ -26,8 +26,11 @@ import json
 import re
 from pathlib import Path
 
+from collections import deque
+
 from induction.adapters import Shaped
-from induction.model import Entity, Event, Observation, direct
+from induction.links import Link, declare
+from induction.model import Entity, Event, Observation, Tier, direct
 from induction import refs as refs_mod
 
 # Automated (non-human) actors. We tag them at the source so the generic
@@ -124,6 +127,10 @@ def load(raw_dir: str | Path, slug: str) -> Shaped:
 
     if tags_path.exists():
         _shape_tags(json.loads(tags_path.read_text()), source, out)
+
+    # The DAG is git's own structure, so reading it is *shaping*, not
+    # correlating. This turns it into links the shared correlator resolves.
+    _declare_links(out, source, slug)
 
     out.entities.extend(people.entities())
     return out
@@ -263,6 +270,13 @@ def _shape_tags(tags: list[dict], source: str, out: Shaped) -> None:
             evidence=[_ev(source, locator, f"tag {name} -> {commit[:10]}")],
             raw=t,
         ))
+        # The tag names a commit: a link, resolved by the shared correlator.
+        if commit:
+            declare(out.entities[-1], Link(
+                target=f"commit:{commit}", method="tag-target", tier=Tier.JOINED,
+                rationale="release tags a commit that belongs to this run",
+                locator=locator, snippet=f"tag {name} -> {commit[:10]}",
+            ))
         out.events.append(Event(
             id=f"evt:release:{name}",
             entity_id=rel_id,
@@ -279,3 +293,213 @@ def _shape_tags(tags: list[dict], source: str, out: Shaped) -> None:
 def _ev(source: str, locator: str, snippet: str):
     from induction.model import Evidence
     return Evidence(source=source, locator=locator, snippet=(snippet or "")[:200] or None)
+
+
+# ---------------------------------------------------------------------------
+# Declaring links (what used to be a git-specific correlator)
+# ---------------------------------------------------------------------------
+# Reading the commit DAG is *shaping*: it is git's own structure, as much a part
+# of the source format as a commit's author field. What it produces are ordinary
+# `Link`s, which the one shared correlator resolves exactly as it resolves a
+# spreadsheet's foreign key or a mailbox's In-Reply-To. That is why there is no
+# `correlate_git` — and why adding GitHub, QuickBooks or a mailbox needs no
+# correlator either.
+
+# A PR branch above this size is not one contribution run; the walk gives up and
+# the merge is declared an integration/release train instead. Generous on
+# purpose — real feature PRs sit well under it.
+_ABSORB_CAP = 60
+
+
+def _declare_links(out: Shaped, source: str, slug: str) -> None:
+    commits = {e.id: e for e in out.entities if e.type == "commit"}
+    if not commits:
+        return
+    sha_of = {eid: e.raw["sha"] for eid, e in commits.items()}
+    id_by_sha = {sha: eid for eid, sha in sha_of.items()}
+    parents_by_sha = {sha_of[eid]: e.attrs.get("parents", []) for eid, e in commits.items()}
+    present = set(parents_by_sha)          # shas actually ingested (shallow boundary)
+    trunk = _first_parent_trunk(commits, sha_of, parents_by_sha, present)
+
+    # A PR's branch walk must stop when it reaches *another* PR's anchor commit —
+    # those commits belong to that PR. This is what keeps a release branch (full
+    # of merged PRs) from being swallowed whole by one merge.
+    pr_anchor_shas = {
+        sha_of[eid] for eid, ent in commits.items()
+        if any(r["kind"] == "pr" and r["via"] in ("merge-pull-request", "squash-subject")
+               for r in ent.attrs.get("references", []))
+    }
+
+    claimed: dict[str, str] = {}           # commit entity id -> the PR that owns it
+
+    # ---- merge topology: the strongest structural join git offers ----------
+    # Iterating newest-first and skipping already-claimed commits makes a commit
+    # land in the *nearest* PR that introduced it.
+    for eid, ent in commits.items():
+        if not ent.attrs.get("is_merge"):
+            continue
+        pr_refs = [r for r in ent.attrs.get("references", [])
+                   if r["kind"] == "pr" and r["via"] == "merge-pull-request"]
+        if not pr_refs:
+            continue
+        number = pr_refs[0]["number"]
+        subject = ent.attrs.get("subject", "")
+        branch, overflowed = _branch_commits(eid, sha_of, id_by_sha, parents_by_sha,
+                                             present, trunk, claimed, pr_anchor_shas)
+        if overflowed:
+            # A "PR" introducing more commits than any single contribution
+            # plausibly does is a release/integration train. We say so as the
+            # *heuristic* judgement it is — a size threshold, not a structural
+            # fact — rather than asserting a 1000-commit "process instance".
+            looks_release = ("release" in subject.lower()
+                             or "release" in (ent.attrs.get("merge_branch") or "").lower())
+            kind = "release" if looks_release else "integration"
+            target = f"release:{number}" if looks_release else f"integration:pr:{number}"
+            declare(ent, Link(
+                target=target, method="oversized-merge", tier=Tier.HEURISTIC,
+                rationale=(f"merge #{number} introduces >{_ABSORB_CAP} commits — treated as a "
+                           f"release/integration train, not one contribution run"),
+                locator=sha_of[eid], snippet=subject,
+                anchors=True, virtual=True, anchor_attrs={"type": kind, "pr": number},
+            ))
+            claimed[eid] = target
+            continue
+
+        pr_link = dict(
+            target=f"pr:{number}", tier=Tier.JOINED, locator=sha_of[eid],
+            materialise="pr", materialise_attrs={"number": number, "timeline": "off-git"},
+            anchors=True, anchor_attrs={"type": "pr", "number": number},
+        )
+        # The merge commit is declared first so it — not an arbitrary branch
+        # commit — is the reason recorded for the case existing at all.
+        declare(ent, Link(method="merge-commit", snippet=subject,
+                          rationale="this is the merge commit that closed the PR", **pr_link))
+        claimed[eid] = f"pr:{number}"
+        for member in branch:
+            if member in claimed:
+                continue
+            declare(commits[member], Link(
+                method="merge-topology", snippet=commits[member].attrs.get("subject", ""),
+                rationale="reachable from the PR merge but not from the trunk it merged into",
+                **pr_link))
+            claimed[member] = f"pr:{number}"
+
+    # ---- squash-merge subjects "(#N)" on still-unclaimed commits -----------
+    for eid, ent in commits.items():
+        if eid in claimed:
+            continue
+        pr_refs = [r for r in ent.attrs.get("references", [])
+                   if r["kind"] == "pr" and r["via"] == "squash-subject"]
+        if not pr_refs:
+            continue
+        number = pr_refs[0]["number"]
+        declare(ent, Link(
+            target=f"pr:{number}", method="squash-subject", tier=Tier.JOINED,
+            rationale="squash-merge subject carries the PR number",
+            locator=sha_of[eid], snippet=ent.attrs.get("subject", ""),
+            materialise="pr", materialise_attrs={"number": number, "timeline": "off-git"},
+            anchors=True, anchor_attrs={"type": "pr", "number": number},
+        ))
+        claimed[eid] = f"pr:{number}"
+
+    # ---- issue references -------------------------------------------------
+    # An issue on a commit already in a PR *enriches* that run (the PR addresses
+    # the issue); on an unclaimed commit it *anchors* a run of its own. Both are
+    # the same link — `anchor_rank` says a PR names a run more strongly than an
+    # issue does, and the correlator picks between them.
+    for eid, ent in commits.items():
+        for r in ent.attrs.get("references", []):
+            if r["kind"] != "issue":
+                continue
+            number = r["number"]
+            tier = Tier.from_label(r["tier"])
+            rationale = ("issue-closing keyword" if tier == Tier.JOINED else
+                         f"bare '#{number}' mention — a reference, not a proven link")
+            declare(ent, Link(
+                target=f"issue:{slug}:{number}", method=r["via"], tier=tier,
+                rationale=rationale, locator=sha_of[eid], snippet=r["snippet"],
+                materialise="issue",
+                materialise_attrs={"number": number, "timeline": "off-git"},
+                anchors=True, anchor_rank=1,
+                anchor_attrs={"type": "issue", "number": number},
+            ))
+
+    # ---- "Merge branch 'X'" integration commits (the release spine) --------
+    for eid, ent in commits.items():
+        if eid in claimed:
+            continue
+        branch_name = ent.attrs.get("merge_branch")
+        if not branch_name:
+            continue
+        # Each integration merge is its OWN run — lumping every "Merge branch
+        # 'stable'" into one case would invent a single 15-step "instance" that
+        # never happened. One backport = one run. No entity is materialised:
+        # the run is a case identity, not a thing with a record somewhere.
+        declare(ent, Link(
+            target=f"integration:{branch_name}:{sha_of[eid][:8]}", method="branch-merge",
+            tier=Tier.JOINED, rationale=f"integration merge of branch '{branch_name}'",
+            locator=sha_of[eid], snippet=ent.attrs.get("subject", ""),
+            anchors=True, virtual=True,
+            anchor_attrs={"type": "integration", "branch": branch_name,
+                          "sha": sha_of[eid][:8]},
+        ))
+        claimed[eid] = branch_name
+
+
+def _first_parent_trunk(commits, sha_of, parents_by_sha, present) -> set[str]:
+    """The mainline: follow first-parent from HEAD. A PR merge's branch commits
+    are precisely those reachable from its 2nd parent that are NOT on this trunk,
+    so knowing the trunk lets us bound each branch walk to the branch itself."""
+    head_sha = None
+    for eid, ent in commits.items():
+        if any("HEAD" in r for r in ent.attrs.get("refs", [])):
+            head_sha = sha_of[eid]
+            break
+    if head_sha is None and commits:
+        # commits.jsonl is newest-first; the first entity is the tip.
+        head_sha = next(iter(commits.values())).raw["sha"]
+    trunk: set[str] = set()
+    cur = head_sha
+    while cur and cur in present and cur not in trunk:
+        trunk.add(cur)
+        parents = parents_by_sha.get(cur, [])
+        cur = parents[0] if parents else None
+    return trunk
+
+
+def _branch_commits(merge_eid, sha_of, id_by_sha, parents_by_sha, present, trunk,
+                    claimed, pr_anchor_shas) -> tuple[list[str], bool]:
+    """Commits introduced by a PR merge = reachable from its 2nd+ parents,
+    stopping at: the trunk (where the branch forked), already-claimed commits,
+    and *other* PR anchor commits (which belong to those PRs). Bounded to the
+    branch, so it stays cheap even over long history.
+
+    Returns ``(commits, overflowed)``. ``overflowed`` is True when the walk blew
+    past ``_ABSORB_CAP`` — the signal that this is not a normal PR.
+    """
+    merge_sha = sha_of[merge_eid]
+    parents = parents_by_sha.get(merge_sha, [])
+    if len(parents) < 2:
+        return [], False
+    out: list[str] = []
+    seen: set[str] = set()
+    queue = deque(p for p in parents[1:] if p in present)
+    while queue:
+        sha = queue.popleft()
+        if sha in seen or sha in trunk:
+            continue
+        seen.add(sha)
+        eid = id_by_sha.get(sha)
+        if eid is None:
+            continue
+        if eid in claimed:
+            continue                       # already owned by a nearer PR
+        if sha in pr_anchor_shas and sha != merge_sha:
+            continue                       # boundary: belongs to another PR
+        out.append(eid)
+        if len(out) > _ABSORB_CAP:
+            return out, True
+        for p in parents_by_sha.get(sha, []):
+            if p in present and p not in trunk and p not in seen:
+                queue.append(p)
+    return out, False
