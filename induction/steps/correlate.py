@@ -124,7 +124,14 @@ def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correl
     # for a version, one backport run. It anchors and names, but is not a thing.
     virtual: dict[str, Link] = {}
     anchor_claims: dict[str, Link] = {}      # node id -> the link that named it
-    attach: dict[str, Confidence] = {}       # entity id -> why it is in its case
+    # Two different questions, kept apart because conflating them launders a
+    # guess into a fact: `attach` is "why is this record in a case with the
+    # *others*" (the connecting link), `self_conf` is "why is this record a run
+    # at all" (its own claim on itself). A record that anchors its own case is
+    # certain of its own events; a record dragged into someone else's case is
+    # only ever as sure as the link that dragged it.
+    attach: dict[str, Confidence] = {}
+    self_conf: dict[str, Confidence] = {}
 
     def resolve(source_id: str, link: Link) -> Optional[str]:
         """Find (or legitimately invent) the node a link points at."""
@@ -152,15 +159,19 @@ def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correl
             # Nothing to union, but it does license a case to exist.
             if link.anchors:
                 anchor_claims.setdefault(source_id, link)
-                attach.setdefault(source_id, link.confidence)
+                self_conf.setdefault(source_id, link.confidence)
             return
         target = resolve(source_id, link)
         if target is None:
             return
         graph.union(source_id, target)
-        # First claim wins, and claims arrive strongest-first, so a record keeps
-        # the strongest reason it has for being where it is.
+        # Both ends are in this case *because of this link*, so both are scored
+        # by it — scoring only the source would leave the pointed-at record
+        # looking certain of a membership it owes entirely to the pointer.
+        # First claim wins and claims arrive strongest-first, so each record
+        # keeps the strongest reason it has for being where it is.
         attach.setdefault(source_id, link.confidence)
+        attach.setdefault(target, link.confidence)
         if link.anchors:
             anchor_claims.setdefault(target, link)
 
@@ -199,8 +210,8 @@ def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correl
 
     # ---- assemble ---------------------------------------------------------
     shaped.entities.extend(materialised.values())
-    return _build_cases(graph, entities, virtual, anchor_claims, attach,
-                        events_by_entity, obs_by_entity, policy)
+    return _build_cases(graph, entities, virtual, anchor_claims, attach, self_conf,
+                        events_by_entity, obs_by_entity)
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +379,8 @@ def _dt(raw: Optional[str]) -> Optional[datetime]:
 # Case assembly
 # ---------------------------------------------------------------------------
 
-def _build_cases(graph, entities, virtual, anchor_claims, attach,
-                 events_by_entity, obs_by_entity, policy) -> Correlation:
+def _build_cases(graph, entities, virtual, anchor_claims, attach, self_conf,
+                 events_by_entity, obs_by_entity) -> Correlation:
     order = list(entities) + list(virtual)
     corr = Correlation()
 
@@ -398,7 +409,11 @@ def _build_cases(graph, entities, virtual, anchor_claims, attach,
 
         for m in real:
             evs, obs = events_by_entity.get(m, []), obs_by_entity.get(m, [])
-            link_conf = attach.get(m) or case.confidence
+            if m == anchor_id:
+                # The anchor's own records are in its own case by definition.
+                link_conf = self_conf.get(m) or attach.get(m) or case.confidence
+            else:
+                link_conf = attach.get(m) or self_conf.get(m) or case.confidence
             if m not in case.entity_ids:
                 case.entity_ids.append(m)
             for ev in evs:
@@ -462,18 +477,20 @@ def _anchor_attrs(node: str, entities, link: Link | None) -> dict:
 
 
 def _case_confidence(members, anchor_id, anchor_claims, attach) -> Confidence:
-    """How sure we are this run exists at all.
+    """How sure we are this run exists *as a run*, holding together.
 
-    The link that *named* the case is the claim that it is a run, so that is the
-    confidence reported — and where several members were attached by weaker
-    links, the case cannot be stronger than its weakest member. Weakest-link is
-    the same rule `Confidence.weakest` applies to any chain of inference.
+    The link that named the case is the claim that it is a run — but a case
+    assembled with one fuzzy member is a fuzzy case, however certain its anchor
+    is of itself. So the reported confidence is the weakest link holding it
+    together, the same rule `Confidence.weakest` applies to any chain of
+    inference. Reporting the anchor's own certainty instead would let a guess
+    ride into the output wearing `direct`, which is the single most damaging
+    thing this engine could do.
     """
     named = anchor_claims.get(anchor_id)
-    tiers = [attach[m] for m in members if m in attach]
+    links = [attach[m] for m in members if m in attach]
     if named is not None:
-        floor = min([named.confidence] + tiers, key=lambda c: c.tier)
-        return named.confidence if floor.tier >= named.tier else floor
-    if tiers:
-        return min(tiers, key=lambda c: c.tier)
+        links.append(named.confidence)
+    if links:
+        return min(links, key=lambda c: c.tier)
     return heuristic("records grouped with no declared link")

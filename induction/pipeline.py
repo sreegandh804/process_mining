@@ -120,8 +120,14 @@ def _default_gap_detectors(slug: str, terminal_action: str, corroborating_action
 # ---------------------------------------------------------------------------
 
 def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
-                 with_thin: bool = True, profile=None) -> InducedModel:
-    """Git history (+ its changelog) -> induced model."""
+                 with_thin: bool = True, with_github: bool = False,
+                 profile=None) -> InducedModel:
+    """Git history (+ its changelog, + its GitHub Issues/PR corpus) -> induced model.
+
+    Adding a source here is one `extend` call and nothing else — no branch
+    downstream, no correlator, no second pipeline. That is the whole return on
+    making adapters declare links instead of correlating.
+    """
     # DEFAULT is the generic, source-agnostic profile: unnamed kinds + activities,
     # data-derived rationales. A caller can pass a matching profile (e.g. the git
     # one) purely to make a familiar corpus read nicely — it never changes the
@@ -135,7 +141,15 @@ def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
         import json
         manifest = json.loads(manifest_path.read_text())
 
-    shaped = git_history.load(raw_dir, slug)
+    shaped = Shaped()
+    if with_github:
+        # Loaded FIRST so that its real PR/issue records exist before git's
+        # references to them are resolved: the reference then resolves to the
+        # record instead of materialising an inferred stub beside it.
+        from induction.adapters import github_api
+        shaped.extend(github_api.load(raw_dir, slug))
+        manifest["with_github"] = True
+    shaped.extend(git_history.load(raw_dir, slug))
     if with_thin:
         from induction.adapters import changelog
         shaped.extend(changelog.load(raw_dir, slug))
