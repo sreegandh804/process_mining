@@ -1,0 +1,10 @@
+# The induction engine's baseline runs on the Python standard library ONLY.
+# This is a deliberate design choice (see README "What is deliberately not built"):
+# the deterministic baseline must be reproducible and easy for another engineer
+# to pick up, with no dependency install required to run the pipeline.
+#
+# The only dependency below is for running the test-suite, and even that is
+# optional — the tests also import nothing outside stdlib except pytest's runner.
+#
+# dev / test only:
+pytest>=7.0
