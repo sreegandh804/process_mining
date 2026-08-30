@@ -127,7 +127,7 @@ def test_a_fuzzy_join_is_tiered_and_says_what_it_matched_on(gh_model):
     why = case.confidence.rationale
     assert "no shared key" in why
     assert "csv" in why and "export" in why      # the tokens it actually matched
-    assert "days apart" in why or "same actor" in why
+    assert "days apart" in why or "shared actor" in why
 
     opened = next(e for e in gh_model.shaped.events
                   if e.entity_id == "issue:acme/widget:20" and e.action == "opened")

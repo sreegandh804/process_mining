@@ -57,3 +57,28 @@ def test_cross_source_join_thin_meets_thick(mini_shaped):
                if o.id == "obs:changelog_entry:acme/widget:1.1.0:0")
     assert obs.case_id == "case:pr:2"
     assert obs.case_confidence.tier.label == "joined"
+
+
+def test_fuzzy_does_not_merge_two_runs_of_the_same_kind(mini_shaped):
+    """The dependency bumps (#3 and #4) stay two runs, not one.
+
+    They are the fuzzy pass's most dangerous case: near-identical text, the same
+    bot, a day apart. Joining them would invent a two-commit "instance" that
+    never happened *and* destroy the evidence that this is a recurring pattern —
+    which is precisely what makes it a look-alike non-process worth rejecting
+    downstream. Complementary roles justify a fuzzy join; duplicated ones do not.
+    """
+    shaped, corr, slug = mini_shaped
+    assert "case:pr:3" in corr.cases and "case:pr:4" in corr.cases
+    assert corr.cases["case:pr:3"].entity_ids != corr.cases["case:pr:4"].entity_ids
+    for cid in ("case:pr:3", "case:pr:4"):
+        assert "no shared key" not in (corr.cases[cid].confidence.rationale or "")
+
+
+def test_no_fuzzy_join_fires_on_a_corpus_determinism_already_explains(mini_shaped):
+    """Where a real key exists, the guess never runs. If the git corpus started
+    producing fuzzy links, every `joined` in the output would deserve suspicion."""
+    shaped, corr, slug = mini_shaped
+    fuzzy = [c.id for c in corr.cases.values()
+             if "no shared key" in (c.confidence.rationale or "")]
+    assert fuzzy == []
