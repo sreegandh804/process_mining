@@ -186,6 +186,21 @@ def correlate(shaped: Shaped, slug: str) -> Correlation:
         _place(eid, case, assigned, corr, events_by_entity, commits,
                joined("integration merge commit"), sha_of, source)
 
+    # ---- pass 5: attach a release tag to the run of the commit it points at ----
+    for ent in list(shaped.entities):
+        if ent.type != "release":
+            continue
+        commit_eid = id_by_sha.get(ent.attrs.get("commit", ""))
+        if commit_eid and commit_eid in assigned:
+            case = corr.cases[assigned[commit_eid]]
+            if ent.id not in case.entity_ids:
+                case.entity_ids.append(ent.id)
+            for ev in events_by_entity.get(ent.id, []):
+                ev.case_id = case.id
+                ev.case_confidence = joined("release tags a commit that belongs to this run")
+                if ev.id not in case.event_ids:
+                    case.event_ids.append(ev.id)
+
     shaped.entities.extend(inferred_entities.values())
     return corr
 

@@ -256,9 +256,9 @@ function gapNode(g){
   return `<div class="node inferred"><div class="row"><b>⤳ ${esc(g.kind)}</b> ${tierChip(g.confidence)} <span class="muted">inferred — off-system</span></div>
     <div class="ev">${esc(g.description)}${g.evidence&&g.evidence[0]?` <br>signal: <code>${esc(g.evidence[0].locator)}</code>`:''}</div></div>`;
 }
-function caseView(c){
+function caseView(c, open){
   const gapsBefore = c.gaps.filter(g=>g.kind==='off_system_pr_open_review');
-  return `<details><summary>run <code>${esc(c.id)}</code> · ${esc(c.order_status)} ${tierChip(c.confidence)}</summary>
+  return `<details ${open?'open':''}><summary>run <code>${esc(c.id)}</code> · ${esc(c.order_status)} ${tierChip(c.confidence)}</summary>
     <div class="trace">
       ${gapsBefore.map(gapNode).join('')}
       ${c.trace.map(traceNode).join('')}
@@ -275,7 +275,7 @@ function kindView(k){
       <div class="variant ${v.role}"><div class="row"><b>${v.frequency}×</b> <span>${esc(v.role)}</span></div>
         <div class="sig">${v.signature.map(esc).join(' → ')||'∅'}</div></div>`).join('')}</div>
     ${k.samples.length?`<div class="muted" style="margin-top:6px">Example runs (evidence resolves to a git sha):</div>`:''}
-    ${k.samples.map(caseView).join('')}
+    ${k.samples.map((c,i)=>caseView(c, i===0)).join('')}
   </div>`;
 }
 document.getElementById('tab-processes').innerHTML =
