@@ -1,14 +1,22 @@
 """The pipeline — wires steps 0-6 into one induced model.
 
 Order of operations (and why):
-  shape      : adapters turn raw -> canonical Entity/Event/Observation.
-  correlate  : group events into cases (the graded core).
+  shape      : adapters turn raw -> canonical Entity/Event/Observation + Links.
+  correlate  : group records into cases (the graded core).
   order      : sort each case into a trace; flag unknowable order.
   label      : name activities; merge same-activity-different-people.
   segment    : split cases into *kinds*; compute variants per kind.
   reject     : flag look-alike non-processes.
   gaps       : infer off-system steps from discontinuities.
   orphans    : collect everything that joined to nothing.
+
+Everything from `correlate` onward is `induce()`, and it is **the same code for
+every source**. A source contributes a `Shaped` bundle and nothing else — no
+correlator, no pipeline of its own. `run_pipeline` and `run_tabular_pipeline`
+below are thin *loaders*: they know how to find and shape a corpus, then hand it
+to the identical core. That is what makes "a new customer is an adapter" true
+rather than aspirational; mixing sources is then just concatenating them, which
+is exactly how cross-source fuzzy correlation gets its chance to fire.
 
 We keep `shaped` (the substrate, with `raw` intact) beside the induced model so
 the divergence hook (belief vs data) has both sides to compare later.
@@ -18,12 +26,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Iterable, Optional
 
-from induction.adapters import Shaped, git_history
+from induction.adapters import Shaped
 from induction.honesty import apply_reject, collect_orphans
 from induction.process import Case, Gap, Orphan, ProcessKind, Step
-from induction.steps.correlate import Correlation, correlate
-from induction.steps.order import order
+from induction.steps.correlate import Correlation, CorrelationPolicy, correlate
+from induction.steps.order import order, order_observations
 from induction.steps.segment import segment
 
 
@@ -45,15 +54,85 @@ class InducedModel:
         return self.correlation.cases
 
 
+def induce(shaped: Shaped, slug: str = "model", profile=None, manifest: Optional[dict] = None,
+           policy: Optional[CorrelationPolicy] = None,
+           gap_detectors: Optional[Iterable[Callable]] = None,
+           terminal_action: str = "paid", corroborating_action: str = "settled") -> InducedModel:
+    """Steps 2-6 over an already-shaped corpus. Source-agnostic by construction.
+
+    `shaped` may be one adapter's output or several concatenated — the correlator
+    sees one record stream either way, which is the only reason a mail thread can
+    join to a ledger row.
+    """
+    from induction.profiles import GENERIC_PROFILE, select_profile
+    if profile is None:
+        profile = GENERIC_PROFILE
+    elif profile == "auto":
+        profile = select_profile(shaped)
+
+    corr = correlate(shaped, policy)
+    order(shaped, corr)
+    order_observations(shaped.observations, corr)
+
+    from induction.steps.label import label as label_step
+    label_result = label_step(shaped, corr, profile)
+
+    kinds = segment(shaped, corr, profile)
+    apply_reject(kinds, profile)
+
+    gaps: list[Gap] = []
+    for detector in (gap_detectors if gap_detectors is not None
+                     else _default_gap_detectors(slug, terminal_action, corroborating_action)):
+        gaps.extend(detector(shaped, corr, kinds))
+
+    orphans = collect_orphans(shaped, corr)
+    return InducedModel(
+        slug=slug, manifest=manifest or {}, shaped=shaped, correlation=corr,
+        profile_id=getattr(profile, "id", "generic"),
+        kinds=kinds, steps=label_result.steps, merges=label_result.merges,
+        gaps=gaps, orphans=orphans,
+    )
+
+
+def _default_gap_detectors(slug: str, terminal_action: str, corroborating_action: str):
+    """Every detector, every run.
+
+    A detector is an inference *rule*, not a source: each one is a no-op on data
+    that lacks its signal (the off-platform-review rule only looks at cases whose
+    anchor is a pull request, the reconciliation rule only at terminal states
+    that never got corroborated). So they all run and the data decides which
+    fire — rather than the caller having to know which source it is holding.
+    """
+    from induction.steps.gaps import infer_gaps
+    from induction.steps.gaps_generic import infer_missing_step_gaps, infer_reconciliation_gaps
+
+    return [
+        lambda shaped, corr, kinds: infer_gaps(shaped, corr, slug),
+        lambda shaped, corr, kinds: infer_missing_step_gaps(corr, kinds),
+        lambda shaped, corr, kinds: infer_reconciliation_gaps(
+            shaped, corr, kinds, terminal_action=terminal_action,
+            corroborating_action=corroborating_action),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Loaders — the only per-source code, and it only knows how to *read* a corpus
+# ---------------------------------------------------------------------------
+
 def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
-                 with_thin: bool = True, profile=None) -> InducedModel:
+                 with_thin: bool = True, with_github: bool = False,
+                 profile=None) -> InducedModel:
+    """Git history (+ its changelog, + its GitHub Issues/PR corpus) -> induced model.
+
+    Adding a source here is one `extend` call and nothing else — no branch
+    downstream, no correlator, no second pipeline. That is the whole return on
+    making adapters declare links instead of correlating.
+    """
     # DEFAULT is the generic, source-agnostic profile: unnamed kinds + activities,
     # data-derived rationales. A caller can pass a matching profile (e.g. the git
     # one) purely to make a familiar corpus read nicely — it never changes the
     # structure, only the vocabulary. `profile="auto"` picks one from the source.
-    from induction.profiles import GENERIC_PROFILE
-    if profile is None:
-        profile = GENERIC_PROFILE
+    from induction.adapters import git_history
     raw_dir_p = Path(raw_dir)
     key = slug.replace("/", "__")
     manifest_path = raw_dir_p / f"{key}.manifest.json"
@@ -62,74 +141,29 @@ def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
         import json
         manifest = json.loads(manifest_path.read_text())
 
-    # --- shape: thick source (git) ---
-    shaped = git_history.load(raw_dir, slug)
-
-    # --- shape: thin source (changelog) — real Observations through the same pipe ---
+    shaped = Shaped()
+    if with_github:
+        # Loaded FIRST so that its real PR/issue records exist before git's
+        # references to them are resolved: the reference then resolves to the
+        # record instead of materialising an inferred stub beside it.
+        from induction.adapters import github_api
+        shaped.extend(github_api.load(raw_dir, slug))
+        manifest["with_github"] = True
+    shaped.extend(git_history.load(raw_dir, slug))
     if with_thin:
         from induction.adapters import changelog
-        thin = changelog.load(raw_dir, slug)
-        shaped.extend(thin)
+        shaped.extend(changelog.load(raw_dir, slug))
 
-    # `auto` picks a vocabulary from the source now that we have shaped records.
-    if profile == "auto":
-        from induction.profiles import select_profile
-        profile = select_profile(shaped)
-
-    # --- correlate (step 2) ---
-    corr = correlate(shaped, slug)
-    if with_thin:
-        from induction.adapters import changelog as _cl
-        _cl.correlate_thin(shaped, corr, slug)
-
-    # --- order (step 3) ---
-    order(shaped, corr)
-    if with_thin:
-        from induction.steps.order import order_observations
-        order_observations(shaped.observations, corr)
-
-    # --- label (step 5) ---
-    from induction.steps.label import label
-    label_result = label(shaped, corr, profile)
-
-    # --- segment (step 0) + variants (step 4) ---
-    kinds = segment(shaped, corr, profile)
-
-    # --- reject (§6): flag look-alike non-processes ---
-    apply_reject(kinds, profile)
-
-    # --- gaps (step 6): infer off-system steps ---
-    from induction.steps.gaps import infer_gaps
-    gaps = infer_gaps(shaped, corr, slug)
-
-    # --- orphans (§6) ---
-    orphans = collect_orphans(shaped, corr)
-
-    return InducedModel(
-        slug=slug, manifest=manifest, shaped=shaped, correlation=corr,
-        profile_id=getattr(profile, "id", "generic"),
-        kinds=kinds, steps=label_result.steps, merges=label_result.merges,
-        gaps=gaps, orphans=orphans,
-    )
+    return induce(shaped, slug=slug, profile=profile, manifest=manifest)
 
 
 def run_tabular_pipeline(sources, slug="tabular", profile=None,
                          terminal_action="paid", corroborating_action="settled") -> InducedModel:
-    """The non-git path: a list of (TableSpec, path) spreadsheet sources through
-    the SAME order/label/segment/reject/orphan machinery, with the generic
-    identity/foreign-key correlator and generic gap detectors.
+    """Spreadsheets -> induced model.
 
     `sources` : list of (induction.adapters.tabular.TableSpec, path-to-csv-or-xlsx).
     """
     from induction.adapters import tabular
-    from induction.profiles import GENERIC_PROFILE
-    from induction.steps.correlate_generic import correlate_by_key
-    from induction.steps.gaps_generic import infer_missing_step_gaps, infer_reconciliation_gaps
-    from induction.steps.label import label as label_step
-    from induction.steps.order import order as order_step, order_observations
-
-    if profile is None:
-        profile = GENERIC_PROFILE
 
     shaped = Shaped()
     sheets = []
@@ -137,28 +171,11 @@ def run_tabular_pipeline(sources, slug="tabular", profile=None,
         shaped.extend(tabular.load(spec, path))
         sheets.append({"source": spec.source, "path": str(path)})
 
-    corr = correlate_by_key(shaped)
-    order_step(shaped, corr)
-    order_observations(shaped.observations, corr)
-
-    label_result = label_step(shaped, corr, profile)
-    kinds = segment(shaped, corr, profile)
-    apply_reject(kinds, profile)
-
-    gaps = infer_missing_step_gaps(corr, kinds)
-    gaps += infer_reconciliation_gaps(shaped, corr, kinds,
-                                      terminal_action=terminal_action,
-                                      corroborating_action=corroborating_action)
-    orphans = collect_orphans(shaped, corr)
-
     manifest = {
         "source_kind": "spreadsheet",
         "sheets": sheets,
         "n_rows": len([e for e in shaped.entities if e.type not in ("person", "orphan_row")]),
     }
-    return InducedModel(
-        slug=slug, manifest=manifest, shaped=shaped, correlation=corr,
-        profile_id=getattr(profile, "id", "generic"),
-        kinds=kinds, steps=label_result.steps, merges=label_result.merges,
-        gaps=gaps, orphans=orphans,
-    )
+    return induce(shaped, slug=slug, profile=profile, manifest=manifest,
+                  terminal_action=terminal_action,
+                  corroborating_action=corroborating_action)

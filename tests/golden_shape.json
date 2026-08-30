@@ -1,0 +1,304 @@
+{
+  "cases": {
+    "case:notes:acme/widget:1.0.0": {
+      "confidence": {
+        "rationale": "a changelog version section with no timestamps, actors, or intra-version order",
+        "tier": "heuristic"
+      },
+      "entity_ids": [
+        "changelog_entry:acme/widget:1.0.0:1"
+      ],
+      "event_ids": [],
+      "kind_hint": "notes",
+      "order_status": "unknown",
+      "trace_signature": []
+    },
+    "case:pr:1": {
+      "confidence": {
+        "rationale": "this is the merge commit that closed the PR",
+        "tier": "joined"
+      },
+      "entity_ids": [
+        "changelog_entry:acme/widget:1.0.0:0",
+        "commit:f1",
+        "commit:f2",
+        "commit:m1",
+        "pr:1",
+        "release:1.0.0"
+      ],
+      "event_ids": [
+        "evt:f1:authored",
+        "evt:f2:authored",
+        "evt:f2:coauthored:0",
+        "evt:m1:merged",
+        "evt:release:1.0.0"
+      ],
+      "kind_hint": "pr",
+      "order_status": "ordered",
+      "trace_signature": [
+        "authored",
+        "authored",
+        "merged",
+        "released"
+      ]
+    },
+    "case:pr:2": {
+      "confidence": {
+        "rationale": "squash-merge subject carries the PR number",
+        "tier": "joined"
+      },
+      "entity_ids": [
+        "changelog_entry:acme/widget:1.1.0:0",
+        "commit:r1",
+        "commit:s1",
+        "issue:acme/widget:7",
+        "pr:2"
+      ],
+      "event_ids": [
+        "evt:r1:reverted",
+        "evt:s1:authored",
+        "evt:s1:committed"
+      ],
+      "kind_hint": "pr",
+      "order_status": "ordered",
+      "trace_signature": [
+        "authored",
+        "committed",
+        "reverted"
+      ]
+    },
+    "case:pr:3": {
+      "confidence": {
+        "rationale": "squash-merge subject carries the PR number",
+        "tier": "joined"
+      },
+      "entity_ids": [
+        "changelog_entry:acme/widget:1.1.0:1",
+        "commit:d1",
+        "pr:3"
+      ],
+      "event_ids": [
+        "evt:d1:authored"
+      ],
+      "kind_hint": "pr",
+      "order_status": "ordered",
+      "trace_signature": [
+        "authored"
+      ]
+    },
+    "case:pr:4": {
+      "confidence": {
+        "rationale": "squash-merge subject carries the PR number",
+        "tier": "joined"
+      },
+      "entity_ids": [
+        "commit:d2",
+        "pr:4"
+      ],
+      "event_ids": [
+        "evt:d2:authored"
+      ],
+      "kind_hint": "pr",
+      "order_status": "ordered",
+      "trace_signature": [
+        "authored"
+      ]
+    }
+  },
+  "entity_ids": [
+    "changelog_entry:acme/widget:1.0.0:0",
+    "changelog_entry:acme/widget:1.0.0:1",
+    "changelog_entry:acme/widget:1.1.0:0",
+    "changelog_entry:acme/widget:1.1.0:1",
+    "commit:c1",
+    "commit:d1",
+    "commit:d2",
+    "commit:f1",
+    "commit:f2",
+    "commit:m1",
+    "commit:o1",
+    "commit:r1",
+    "commit:s1",
+    "issue:acme/widget:7",
+    "person:49699333+dependabot[bot]@users.noreply.github.com",
+    "person:alice@acme.io",
+    "person:bob@acme.io",
+    "person:carol@acme.io",
+    "person:dave@acme.io",
+    "pr:1",
+    "pr:2",
+    "pr:3",
+    "pr:4",
+    "release:1.0.0"
+  ],
+  "event_case_tiers": [
+    [
+      "evt:c1:authored",
+      "",
+      ""
+    ],
+    [
+      "evt:d1:authored",
+      "case:pr:3",
+      "joined"
+    ],
+    [
+      "evt:d2:authored",
+      "case:pr:4",
+      "joined"
+    ],
+    [
+      "evt:f1:authored",
+      "case:pr:1",
+      "joined"
+    ],
+    [
+      "evt:f2:authored",
+      "case:pr:1",
+      "joined"
+    ],
+    [
+      "evt:f2:coauthored:0",
+      "case:pr:1",
+      "joined"
+    ],
+    [
+      "evt:m1:merged",
+      "case:pr:1",
+      "joined"
+    ],
+    [
+      "evt:o1:authored",
+      "",
+      ""
+    ],
+    [
+      "evt:r1:reverted",
+      "case:pr:2",
+      "joined"
+    ],
+    [
+      "evt:release:1.0.0",
+      "case:pr:1",
+      "joined"
+    ],
+    [
+      "evt:s1:authored",
+      "case:pr:2",
+      "joined"
+    ],
+    [
+      "evt:s1:committed",
+      "case:pr:2",
+      "joined"
+    ]
+  ],
+  "gaps": [
+    [
+      "case:notes:acme/widget:1.0.0",
+      "reconciliation",
+      "References issue 'acme/widget:999', which is not present in the corpus \u2014 an unmatched record to reconcile."
+    ],
+    [
+      "case:pr:1",
+      "off_system_pr_open_review",
+      "PR #1 was opened and reviewed on GitHub before it landed; git records neither. The PR number is the only trace of an off-system open + review."
+    ],
+    [
+      "case:pr:2",
+      "author_committer_handoff",
+      "Authored by Dave Fixer but applied by Alice Maintainer 5 days later \u2014 an off-system review/acceptance decision with no event of its own."
+    ],
+    [
+      "case:pr:2",
+      "off_system_pr_open_review",
+      "PR #2 was opened and reviewed on GitHub before it landed; git records neither. The PR number is the only trace of an off-system open + review."
+    ],
+    [
+      "case:pr:3",
+      "off_system_pr_open_review",
+      "PR #3 was opened and reviewed on GitHub before it landed; git records neither. The PR number is the only trace of an off-system open + review."
+    ],
+    [
+      "case:pr:4",
+      "off_system_pr_open_review",
+      "PR #4 was opened and reviewed on GitHub before it landed; git records neither. The PR number is the only trace of an off-system open + review."
+    ]
+  ],
+  "kinds": [
+    [
+      "kind_1",
+      2
+    ],
+    [
+      "kind_2",
+      2
+    ],
+    [
+      "kind_3",
+      1
+    ]
+  ],
+  "n_entities": 24,
+  "n_events": 12,
+  "n_observations": 4,
+  "obs_case_tiers": [
+    [
+      "obs:changelog_entry:acme/widget:1.0.0:0",
+      "case:pr:1",
+      "joined"
+    ],
+    [
+      "obs:changelog_entry:acme/widget:1.0.0:1",
+      "case:notes:acme/widget:1.0.0",
+      "heuristic"
+    ],
+    [
+      "obs:changelog_entry:acme/widget:1.1.0:0",
+      "case:pr:2",
+      "joined"
+    ],
+    [
+      "obs:changelog_entry:acme/widget:1.1.0:1",
+      "case:pr:3",
+      "joined"
+    ]
+  ],
+  "orphans": [
+    [
+      "evt:c1:authored",
+      "commit references no PR or issue and is not reachable from any PR merge \u2014 a direct-to-branch commit with no run to attach to"
+    ],
+    [
+      "evt:o1:authored",
+      "commit references no PR or issue and is not reachable from any PR merge \u2014 a direct-to-branch commit with no run to attach to"
+    ]
+  ],
+  "steps": [
+    [
+      "authored",
+      "authored",
+      8
+    ],
+    [
+      "committed",
+      "committed",
+      1
+    ],
+    [
+      "merged",
+      "merged",
+      1
+    ],
+    [
+      "released",
+      "released",
+      1
+    ],
+    [
+      "reverted",
+      "reverted",
+      1
+    ]
+  ]
+}

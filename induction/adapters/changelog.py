@@ -17,8 +17,13 @@ way a thin CSV export carries a status column.
 
 Where a bullet cites a PR/issue that the git side already has a case for, the
 two sources correlate on that shared key (tier `joined`) — thin data enriching
-thick. Where it does not, the bullet lands in a thin-only, order-`unknown` case:
-graceful degradation, proven on real data rather than asserted.
+thick. Where it does not, the bullet falls back to a thin-only, order-`unknown`
+case per version: graceful degradation, proven on real data rather than asserted.
+
+Both of those are declared as `Link`s and resolved by the one shared correlator.
+This adapter used to carry its own `correlate_thin()`, which is how the engine
+ended up with a correlator per source — the exact trap that makes cross-source
+joining impossible, since each copy could only ever see its own records.
 """
 
 from __future__ import annotations
@@ -27,8 +32,8 @@ import re
 from pathlib import Path
 
 from induction.adapters import Shaped
-from induction.model import Confidence, Entity, Evidence, Observation, Tier, direct, joined
-from induction.steps.correlate import Correlation
+from induction.links import Link, declare
+from induction.model import Confidence, Entity, Evidence, Observation, Tier, direct
 
 _VERSION = re.compile(r"^Version\s+(\S+)\s*$")
 _STATUS = re.compile(r"^(Released\b.*|Unreleased)\s*$")
@@ -94,12 +99,41 @@ def _emit_bullet(out, source, slug, version, status, idx, text, lineno, key) -> 
     locator = f"{key}.CHANGES.rst:L{lineno}"
     snippet = text[:200]
 
-    out.entities.append(Entity(
+    entity = Entity(
         id=ent_id, source=source, type="changelog_entry",
         attrs={"version": version, "status": status, "text": text, "references": refs},
         confidence=direct(),
         evidence=[Evidence(source, locator, snippet)],
+    )
+
+    # A cited PR/issue number is a shared key with whatever other source knows
+    # that artefact — thin data meeting thick. We deliberately do NOT materialise
+    # the target: a changelog citing issue #999 is not evidence that an issue
+    # record exists anywhere, only that the note's author believed one did. If no
+    # source has it, the citation is recorded as an unresolved reference and the
+    # bullet falls back to its version section below.
+    for r in refs:
+        target = f"pr:{r['number']}" if r["kind"] == "pr" else f"issue:{slug}:{r['number']}"
+        declare(entity, Link(
+            target=target, method="changelog-citation", tier=Tier.JOINED,
+            rationale=f"changelog bullet and git share {r['kind']} #{r['number']}",
+            locator=locator, snippet=snippet,
+        ))
+
+    # Fallback: bullets nothing else claimed group by the version section they
+    # were printed under. `fallback` is what keeps that from swallowing the real
+    # cases — applied eagerly, one leftover bullet would fuse every run it shares
+    # a version with into a single invented mega-case.
+    declare(entity, Link(
+        target=f"notes:{slug}:{version}", method="version-section", tier=Tier.HEURISTIC,
+        rationale=("a changelog version section with no timestamps, "
+                   "actors, or intra-version order"),
+        locator=locator, snippet=snippet,
+        anchors=True, virtual=True, fallback=True,
+        anchor_attrs={"type": "release_notes", "version": version},
     ))
+
+    out.entities.append(entity)
     out.observations.append(Observation(
         id=f"obs:{ent_id}",
         entity_id=ent_id,
@@ -113,61 +147,3 @@ def _emit_bullet(out, source, slug, version, status, idx, text, lineno, key) -> 
         evidence=[Evidence(source, locator, snippet)],
         seen_at=None,   # deliberately not the release date — see module docstring
     ))
-
-
-def correlate_thin(shaped: Shaped, corr: Correlation, slug: str) -> None:
-    """Attach changelog observations to cases: to the matching git case when the
-    PR/issue number is shared (cross-source `joined`), else into a thin-only,
-    order-unknown case per version."""
-    source = f"changelog:{slug}"
-    obs_by_id = {o.id: o for o in shaped.observations}
-    ent_by_id = {e.id: e for e in shaped.entities}
-
-    thin_versions: dict[str, "list"] = {}
-
-    for obs in shaped.observations:
-        if not obs.id.startswith("obs:changelog_entry:"):
-            continue
-        refs = obs.state.get("references", [])
-        version = obs.state.get("version", "?")
-        joined_here = False
-        for r in refs:
-            if r["kind"] == "pr":
-                target = f"case:pr:{r['number']}"
-            else:
-                target = f"case:issue:{slug}:{r['number']}"
-            case = corr.cases.get(target)
-            if case is not None:
-                obs.case_id = case.id
-                obs.case_confidence = joined(
-                    f"changelog bullet and git share {r['kind']} #{r['number']}")
-                if obs.entity_id not in case.entity_ids:
-                    case.entity_ids.append(obs.entity_id)
-                    case.evidence.append(obs.evidence[0])
-                joined_here = True
-                break
-        if not joined_here:
-            thin_versions.setdefault(version, []).append(obs)
-
-    # Thin-only cases: real observations, no time, no actor, order unknown.
-    for version, obs_list in thin_versions.items():
-        case_id = f"case:notes:{slug}:{version}"
-        case = corr.cases.get(case_id)
-        if case is None:
-            from induction.process import Case
-            case = Case(
-                id=case_id, kind_hint="notes",
-                anchor={"type": "release_notes", "version": version},
-                confidence=Confidence(Tier.HEURISTIC,
-                                     "a changelog version section with no timestamps, "
-                                     "actors, or intra-version order"),
-            )
-            corr.cases[case_id] = case
-        for obs in obs_list:
-            obs.case_id = case.id
-            obs.case_confidence = case.confidence
-            if obs.entity_id not in case.entity_ids:
-                case.entity_ids.append(obs.entity_id)
-            case.event_ids  # thin cases have no events, on purpose
-            if obs.evidence and obs.evidence[0] not in case.evidence:
-                case.evidence.append(obs.evidence[0])

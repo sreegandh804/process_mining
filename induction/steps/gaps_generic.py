@@ -108,17 +108,23 @@ def infer_reconciliation_gaps(shaped: Shaped, corr: Correlation, kinds,
                 evidence=list(case.evidence[:1]),
             ))
 
-    # foreign keys that point nowhere — an unmatched record on the other side
+    # Declared links that point nowhere — an unmatched record on the other side.
+    # Source-agnostic by construction: a spreadsheet's dangling foreign key, a
+    # changelog citing an issue no source has, and a mail referencing an unknown
+    # order all arrive here as the same unresolved `Link`.
     for ent in entities_by_id.values():
-        for ref in ent.attrs.get("unresolved_refs", []):
+        for raw in ent.attrs.get("unresolved_links", []):
+            target = raw.get("target", "")
+            target_type, _, target_key = target.partition(":")
             case_id = next((c.id for c in corr.cases.values() if ent.id in c.entity_ids), "")
             gaps.append(Gap(
-                id=f"gap:unresolved:{ent.id}:{ref['type']}:{ref['key']}",
+                id=f"gap:unresolved:{ent.id}:{target}",
                 case_id=case_id,
                 kind="reconciliation",
-                description=(f"References {ref['type']} '{ref['key']}', which is not present "
-                             f"in the corpus — an unmatched record to reconcile."),
-                confidence=heuristic("foreign key resolves to no known entity"),
+                description=(f"References {target_type} '{target_key or target}', which is not "
+                             f"present in the corpus — an unmatched record to reconcile."),
+                confidence=heuristic(
+                    f"{raw.get('method', 'reference')} resolves to no known record"),
                 evidence=list(ent.evidence[:1]),
             ))
     return gaps

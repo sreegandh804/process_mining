@@ -4,6 +4,7 @@
     python run.py                       # pallets/flask, thick + thin sources
     python run.py --slug pallets/click  # a different (held-out) repo
     python run.py --no-thin             # git only, skip the changelog source
+    python run.py --with-github         # add the Issues/PR corpus (see ingest_github.py)
 
 Emits ``out/model.json`` (the complete induced model) and ``out/inspector.html``
 (the thin inspector) and tells you where they are. If the raw cache is missing
@@ -28,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--raw-dir", default="data/raw")
     ap.add_argument("--out-dir", default="out")
     ap.add_argument("--no-thin", action="store_true", help="skip the thin changelog source")
+    ap.add_argument("--with-github", action="store_true",
+                    help="also load the cached GitHub Issues/PR corpus, so cross-source "
+                         "and fuzzy correlation run against it (see ingest_github.py)")
     ap.add_argument("--profile", choices=["generic", "git", "auto"], default="generic",
                     help="vocabulary overlay. 'generic' (default): unnamed, source-agnostic "
                          "kinds/activities. 'git': friendly names for a git corpus. 'auto': "
@@ -50,7 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"[run] inducing processes from {args.slug} (profile: {args.profile}) ...")
-    m = run_pipeline(args.slug, args.raw_dir, with_thin=not args.no_thin, profile=profile)
+    m = run_pipeline(args.slug, args.raw_dir, with_thin=not args.no_thin,
+                     with_github=args.with_github, profile=profile)
 
     from induction.naming import infer_names
     names = infer_names(m, enable=(args.names == "llm"))

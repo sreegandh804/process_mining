@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from induction.adapters import Shaped
+from induction.links import Link, declare
 from induction.model import Confidence, Entity, Evidence, Event, Observation, Tier, direct, heuristic
 
 _BOT_ACTORS = ("system", "auto", "automated", "bot", "robot", "batch")
@@ -57,6 +58,11 @@ class TableSpec:
     event_columns: list[EventCol] = field(default_factory=list)
     status_column: Optional[str] = None
     attr_columns: list[str] = field(default_factory=list)
+    # Which column(s) hold free text a fuzzy join can read (a description, a
+    # note, a client name) — a name or a list of them. Copied to `summary`
+    # because that is an attribute name the correlator looks for; the sheet's own
+    # column names are arbitrary and the correlator must never learn them.
+    text_column: Optional[str | list[str]] = None
     # foreign keys: {"column": "invoice_id", "target_type": "invoice"}
     ref_columns: list[dict] = field(default_factory=list)
 
@@ -161,6 +167,15 @@ def load(spec: TableSpec, path: str | Path) -> Shaped:
     return out
 
 
+def _summary(spec, row: dict) -> str:
+    """The free text this row offers a fuzzy join, in the spec's column order."""
+    if not spec.text_column:
+        return ""
+    columns = ([spec.text_column] if isinstance(spec.text_column, str)
+               else list(spec.text_column))
+    return " ".join(str(row.get(c) or "").strip() for c in columns).strip()
+
+
 def _shape_row(spec, row, rownum, locator, people, seen_ids, out: Shaped) -> None:
     rid = (row.get(spec.id_column) or "").strip()
     snippet = " | ".join(f"{k}={v}" for k, v in row.items() if v)[:200]
@@ -194,18 +209,43 @@ def _shape_row(spec, row, rownum, locator, people, seen_ids, out: Shaped) -> Non
 
     existing = next((e for e in out.entities if e.id == ent_id), None)
     if existing is None:
-        out.entities.append(Entity(
+        entity = Entity(
             id=ent_id, source=spec.source, type=spec.entity_type,
             attrs={
                 **{c: row.get(c, "") for c in spec.attr_columns},
                 "status": row.get(spec.status_column, "") if spec.status_column else "",
+                "summary": _summary(spec, row),
                 "references": refs,
                 "n_rows": 1,
             },
             confidence=direct(),
             evidence=[Evidence(spec.source, locator, snippet)],
             raw=dict(row),
+        )
+        # A foreign key is a declared link like any other — the same shape a
+        # commit's "(#123)" or a mail header produces, resolved by the same
+        # correlator. The referenced row *anchors* the run (a payment belongs to
+        # its invoice, not the other way round). Nothing is materialised: a
+        # dangling invoice_id is a data-quality finding, not licence to invent
+        # the invoice it points at.
+        # A row with an identity key is a run in its own right — an invoice
+        # owns "raised -> approved -> paid" whether or not anything points at
+        # it. Declared at a weak anchor rank so that when something *does* point
+        # at it, the pointed-at record names the run (the payment belongs to the
+        # invoice, not the reverse).
+        declare(entity, Link(
+            target=ent_id, method="row-identity", tier=Tier.DIRECT,
+            rationale="row carries its own identity key and owns the records on it",
+            locator=locator, snippet=snippet, anchors=True, anchor_rank=5,
         ))
+        for ref in refs:
+            declare(entity, Link(
+                target=f"{ref['type']}:{ref['key']}", method="foreign-key",
+                tier=Tier.JOINED,
+                rationale="records share a row identity / foreign key",
+                locator=locator, snippet=snippet, anchors=True,
+            ))
+        out.entities.append(entity)
     else:
         existing.attrs["n_rows"] += 1
         existing.attrs["duplicate_id"] = True   # two rows claim the same identity
