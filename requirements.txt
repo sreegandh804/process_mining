@@ -12,3 +12,8 @@ pytest>=7.0
 # OPTIONAL, and only for reading .xlsx in the tabular adapter. The CSV path (and
 # everything else) needs nothing beyond the standard library.
 # openpyxl>=3.1
+
+# OPTIONAL, and only for `--names llm` (friendly, AI-suggested names for the
+# induced processes/steps). Needs ANTHROPIC_API_KEY. The engine names everything
+# from the raw activity verbs without it.
+# anthropic>=0.40

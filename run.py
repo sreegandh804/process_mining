@@ -32,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="vocabulary overlay. 'generic' (default): unnamed, source-agnostic "
                          "kinds/activities. 'git': friendly names for a git corpus. 'auto': "
                          "pick by source.")
+    ap.add_argument("--names", choices=["off", "llm"], default="off",
+                    help="'llm' names kinds/steps via the Claude API (needs ANTHROPIC_API_KEY)")
     args = ap.parse_args(argv)
 
     from induction.profiles import GENERIC_PROFILE, GIT_PROFILE
@@ -50,9 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[run] inducing processes from {args.slug} (profile: {args.profile}) ...")
     m = run_pipeline(args.slug, args.raw_dir, with_thin=not args.no_thin, profile=profile)
 
+    from induction.naming import infer_names
+    names = infer_names(m, enable=(args.names == "llm"))
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
-    html_path = write_html(m, out_dir / "inspector.html")
+    html_path = write_html(m, out_dir / "inspector.html", names=names)
 
     s = _summary(m)
     print(s)

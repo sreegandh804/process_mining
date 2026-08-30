@@ -84,11 +84,18 @@ def infer_reconciliation_gaps(shaped: Shaped, corr: Correlation, kinds,
     rejected_cases = {cid for k in kinds if k.rejected for cid in k.case_ids}
     gaps: list[Gap] = []
 
+    # Only reconcile against a source that actually exists. If nothing in the
+    # corpus ever emits the corroborating action (e.g. a single grants sheet with
+    # no bank export), there is nothing to reconcile — do not manufacture a gap
+    # for every terminal record. This is what keeps the check from overfitting to
+    # the finance demo.
+    have_corroboration = any(e.action == corroborating_action for e in shaped.events)
+
     for case in corr.cases.values():
         if case.id in rejected_cases:
             continue
         actions = {events_by_id[e].action for e in case.event_ids if e in events_by_id}
-        if terminal_action in actions and corroborating_action not in actions:
+        if have_corroboration and terminal_action in actions and corroborating_action not in actions:
             gaps.append(Gap(
                 id=f"gap:reconcile:{case.id}",
                 case_id=case.id,

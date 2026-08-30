@@ -32,8 +32,10 @@ browser and read **`out/model.json`** for the complete artefact.
 engine — no clone, no network:
 
 ```bash
-python run_tabular.py                       # samples/finance CSV, generic (unnamed)
-python run_tabular.py --profile accounting  # friendly names for this domain
+python run_tabular.py                       # samples/finance CSV (invoices + bank)
+python run_tabular.py --dir samples/grants  # a grant-making tracker
+python run_tabular.py --profile accounting  # friendly names for finance
+python run_tabular.py --names llm           # let Claude name the processes/steps
 python run_tabular.py --xlsx                # read the .xlsx sheets (needs openpyxl)
 ```
 
@@ -211,11 +213,23 @@ someone writes a 30-line profile for it.
 carrying `confidence` and `evidence[]`, plus empty-but-present cost/value and
 divergence slots.
 
-`out/inspector.html` is a single self-contained file. It is **not** a product
-surface — it exists to prove, for any element, *why it is believed* (evidence
-resolves to a sha) and *how sure* we are (solid = evidenced, dashed = inferred;
-common path bold, rare paths quiet). The customer-facing surface is a separate
-concern (see below).
+`out/inspector.html` is a single self-contained file written for a **non-technical
+operations lead**, and it is fully data-driven and adaptive — the same page reads
+for a grants tracker, an invoice ledger, or a code repo, because it renders
+whatever the model induced (no domain words baked in). It shows:
+
+- **The processes found** — each kind as a named flow, with *every* variant path
+  and how often each ran; a flagged kind carries its "looks like a process,
+  isn't" reason.
+- **Every run, not a sample** — a filterable, searchable table of *all* instances;
+  the filters ("Missing a step", "Ended early", "Unmatched record", "Automated")
+  are just views over the full list. Each row opens to its own timeline, and
+  **every step — including an inferred, dashed one we didn't see — resolves to its
+  exact source record** (a row, a sha).
+
+Process/step **names** come from the profile, or optionally an LLM naming pass
+(`--names llm`, tier `model`, shown as "names suggested by AI"); the LLM only
+*names*, never touches structure. Without it, activities read as their raw verbs.
 
 ---
 
@@ -343,8 +357,10 @@ Also stated-but-unbuilt (hooks are in place):
 ingest.py            git corpus -> cached raw JSON (the only step that touches git)
 run.py               git path:     induce -> out/model.json + out/inspector.html
 run_tabular.py       spreadsheet path (samples/finance): same output, no git
-samples/finance/     the non-git demo corpus (invoices + payments, CSV & XLSX)
+samples/finance/     non-git demo corpus (invoices + payments, CSV & XLSX)
+samples/grants/      a second non-git corpus (a grant-making tracker)
 induction/
+  naming.py          OPTIONAL LLM naming of kinds/steps (tier model; --names llm)
   model.py           Entity / Event / Observation, Evidence, Confidence (tiers)
   refs.py            cross-reference extraction (+ the tier each kind earns)
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
