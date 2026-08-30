@@ -129,8 +129,19 @@ carries confidence + evidence.
   separate `committed` event — a real handoff, not noise. Co-authors become
   sibling `authored` events (the same-activity merge feeds off this).
 
-- **Correlate (2)** — *the graded core*, `steps/correlate.py`. Deterministic,
-  layered, per-link-scored joins:
+- **Correlate (2)** — *the graded core*, `steps/correlate.py`. **One correlator
+  serves every source.** Adapters do not correlate; they declare `Link`s
+  (`induction/links.py`) — "this record points at that one, by this method, at
+  this tier, for this reason" — and the correlator resolves them. A commit's
+  merge topology, a PR's `closes #12`, a spreadsheet's foreign key and a
+  changelog's `:pr:` citation all arrive as the same shape, so a case can be
+  assembled from several sources at once. The correlator contains no source
+  name; `tests/test_github.py` asserts that structurally rather than in prose.
+
+  This was not always true, and the reason it had to change is worth stating: a
+  correlator per source can only ever see its own records, which makes
+  cross-source joining *structurally impossible* — the single hardest thing the
+  brief asks for. Deterministic, layered, per-link-scored joins:
   - **merge-DAG topology** (`joined`): a `Merge pull request #N` commit owns the
     commits it introduced onto the trunk. This uses the real git DAG, so it
     recovers *multi-commit* runs that a text-only join would scatter into
@@ -142,6 +153,16 @@ carries confidence + evidence.
     (`heuristic` — a mention is not a proven link).
   - What stays unjoined stays unjoined → the orphan queue. On flask ~1,500
     commits join no run; that is honest, not a bug.
+  - **fuzzy, no shared key at all** (`heuristic`) — the second pass, over what
+    determinism could not explain. Whole *components* are matched (a mail thread
+    joins as a thread, not as its first message) on text overlap **plus**
+    actor-or-time proximity, and every link records its score and the exact
+    tokens it matched: *"no shared key; text overlap 0.38 on words 'csv',
+    'export', 'row', and 4 days apart"*. Two guards keep it surgical: it never
+    sees a pair determinism already joined, and it declines components whose
+    activity signatures are near-identical — those are two runs of one kind
+    (two dependency bumps), not two halves of one run. On the git corpus it
+    fires **zero** times, which is the correct answer there and is asserted.
 
 - **Order (3)** — `steps/order.py`. Sort by timestamp; git traces are `ordered`.
   Thin observations with no time are `order: unknown` — surfaced, not guessed.
@@ -290,11 +311,15 @@ The baseline is deterministic on purpose. The upgrade path is real and scoped,
 step by step — each would be added only where the crude baseline visibly breaks,
 and each would enter as a lower, clearly-marked tier:
 
-- **Correlate** — fuzzy joins for records with *no shared key* (reference-text
-  similarity, actor+time proximity, entity-name similarity). This is where
-  email/document corpora live. Baseline breaks visibly today: a follow-up commit
-  like `revert cli test change` with no `#ref` lands as an orphan; a fuzzy join
-  would recover it as `heuristic`.
+- ~~**Correlate** — fuzzy joins for records with no shared key.~~ **Built.**
+  The GitHub Issues/PR source forced it: an issue and the pull request that
+  fixes it routinely share no number, keyword or branch, and there is no DAG to
+  fall back on. Text similarity + actor/time proximity, at the *transparent*
+  tier — token overlap with corpus-derived rarity weighting, so every join can
+  name the words it matched (`induction/text.py`). Embeddings are the next rung
+  (`model` tier) and slot in behind the same `similar()` signature; that is
+  still unbuilt, deliberately, because the transparent tier is auditable and an
+  embedding is not.
 - **Segment / Label** — embeddings to *propose* finer kind-boundaries and to
   cluster equivalent activities; an LLM to *name* activities and to judge "are
   these two the same step?". **Guardrail:** the LLM may name and judge
@@ -355,7 +380,9 @@ Also stated-but-unbuilt (hooks are in place):
 
 ```
 ingest.py            git corpus -> cached raw JSON (the only step that touches git)
+ingest_github.py     GitHub Issues/PR API -> cached raw JSON (needs a token)
 run.py               git path:     induce -> out/model.json + out/inspector.html
+                     (--with-github adds the Issues/PR corpus to the same run)
 run_tabular.py       spreadsheet path (samples/finance): same output, no git
 samples/finance/     non-git demo corpus (invoices + payments, CSV & XLSX)
 samples/grants/      a second non-git corpus (a grant-making tracker)
@@ -363,13 +390,15 @@ induction/
   naming.py          OPTIONAL LLM naming of kinds/steps (tier model; --names llm)
   model.py           Entity / Event / Observation, Evidence, Confidence (tiers)
   refs.py            cross-reference extraction (+ the tier each kind earns)
+  links.py           the link vocabulary adapters declare into (the correlation seam)
+  text.py            token similarity for the fuzzy pass (stdlib, IDF, auditable)
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
   profiles.py        where domain vocabulary lives (generic default; git / accounting)
-  adapters/          git_history.py, changelog.py (git); tabular.py (CSV / Excel)
-  steps/             segment, order, variants, label; correlate (git DAG) +
-                     correlate_generic (id / foreign key); gaps + gaps_generic
+  adapters/          git_history.py, changelog.py, github_api.py, tabular.py
+  steps/             segment, order, variants, label; correlate (ONE correlator,
+                     every source); gaps + gaps_generic
   honesty.py         orphans, reject, (unknowns/divergence surfaced in emit)
-  pipeline.py        run_pipeline (git) and run_tabular_pipeline (spreadsheets)
+  pipeline.py        induce() (shared core) + thin per-source loaders
   emit.py            InducedModel -> model.json
   inspector.py       InducedModel -> self-contained inspector.html
 tests/               golden fixture + ugly-record cases + held-out slice + tabular

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from induction.adapters import Shaped
@@ -71,7 +71,7 @@ class FuzzyPolicy:
     # Attribute names the fuzzy pass will read text from, tried in order. Any
     # adapter can populate one; none is required to.
     text_attrs: tuple[str, ...] = (
-        "title", "subject", "summary", "memo", "description", "text", "name",
+        "title", "subject", "summary", "memo", "description", "text", "name", "body",
     )
     min_score: float = 0.30
     min_shared_tokens: int = 1
@@ -84,6 +84,11 @@ class FuzzyPolicy:
     # kind, not two halves of one run — however alike their text. Above this
     # overlap of activity signatures the pass declines to join them.
     max_activity_overlap: float = 0.8
+    # A run can span more than two systems (a ledger, a delivery sheet and the
+    # mail thread about both), and one round joins at most two components. Each
+    # further round must clear the same bar against the *merged* evidence, so
+    # later joins are held to a higher standard, not a lower one.
+    max_rounds: int = 3
 
 
 @dataclass(frozen=True)
@@ -208,19 +213,23 @@ def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correl
     bridge: dict[str, Confidence] = {}
 
     if policy.fuzzy.enabled:
-        for a, b, conf in _fuzzy_pass(policy.fuzzy, entities, events_by_entity,
-                                      obs_by_entity, graph):
-            for side in (a, b):
-                prior = bridge.get(side)
-                bridge[side] = conf if prior is None or conf.tier < prior.tier else prior
-            graph.union(a, b)
-            # A fuzzy pair is a run nobody declared, so it must license its own
-            # case — but at the weakest anchor rank there is, so any real claim
-            # in the component names it instead.
-            claim = Link(target=a, method="fuzzy-match", tier=conf.tier,
-                         rationale=conf.rationale or "", anchors=True, anchor_rank=9)
-            anchor_claims.setdefault(a, claim)
-            anchor_claims.setdefault(b, replace(claim, target=b))
+        for _ in range(max(1, policy.fuzzy.max_rounds)):
+            round_links = _fuzzy_pass(policy.fuzzy, entities, events_by_entity,
+                                      obs_by_entity, graph)
+            if not round_links:
+                break
+            for a, b, conf in round_links:
+                for side in (a, b):
+                    prior = bridge.get(side)
+                    bridge[side] = conf if prior is None or conf.tier < prior.tier else prior
+                graph.union(a, b)
+                # A fuzzy pair is a run nobody declared, so it must license its
+                # own case — but at the weakest anchor rank there is, so any real
+                # claim in the component names it instead.
+                claim = Link(target=a, method="fuzzy-match", tier=conf.tier,
+                             rationale=conf.rationale or "", anchors=True, anchor_rank=9)
+                anchor_claims.setdefault(a, claim)
+                anchor_claims.setdefault(b, replace(claim, target=b))
 
     # ---- assemble ---------------------------------------------------------
     shaped.entities.extend(materialised.values())
@@ -386,12 +395,21 @@ def _same_shape(members_a, members_b, events_by_entity, threshold: float) -> boo
 
 
 def _text_of(entity, attrs: tuple[str, ...]) -> str:
-    """The first populated text attribute — adapters choose what to expose."""
+    """Every populated text attribute an adapter exposes, joined.
+
+    Not the first one: a mail message's evidence is its subject *and* its body,
+    and an invoice's is its customer *and* its memo. Taking only the first would
+    silently discard the half that usually carries the match. Repeated values are
+    dropped so an adapter that exposes the same string twice does not
+    double-weight it.
+    """
+    seen, parts = set(), []
     for name in attrs:
         val = entity.attrs.get(name)
-        if isinstance(val, str) and val.strip():
-            return val
-    return ""
+        if isinstance(val, str) and val.strip() and val not in seen:
+            seen.add(val)
+            parts.append(val.strip())
+    return " ".join(parts)
 
 
 def _proximity(members_a, members_b, events_by_entity, obs_by_entity,
@@ -437,12 +455,24 @@ def _component_when_who(member_ids, events_by_entity, obs_by_entity):
 
 
 def _dt(raw: Optional[str]) -> Optional[datetime]:
+    """Parse a timestamp for comparison, or None. Never raises on bad input.
+
+    Sources disagree about timezones and always will: git and most APIs carry an
+    offset, a spreadsheet cell carries a bare date with no timezone at all. A
+    naive value is read as UTC purely so the two can be *compared* — the
+    alternative is a TypeError the moment a corpus mixes a sheet with an API,
+    which is precisely the corpus this engine is for. Nothing is written back, so
+    no record gains a timezone it did not have; the only use is measuring how far
+    apart two records are, against a window measured in days, where a sub-day
+    ambiguity cannot change the answer.
+    """
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
         return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------

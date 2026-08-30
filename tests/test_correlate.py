@@ -82,3 +82,58 @@ def test_no_fuzzy_join_fires_on_a_corpus_determinism_already_explains(mini_shape
     fuzzy = [c.id for c in corr.cases.values()
              if "no shared key" in (c.confidence.rationale or "")]
     assert fuzzy == []
+
+
+def _record(shaped, eid, text, timestamp, source, action):
+    """A minimal record from an imaginary source, declared the way any adapter would."""
+    from induction.links import Link, declare
+    from induction.model import Entity, Event, Tier, direct
+    ent = Entity(id=eid, source=source, type=eid.split(":")[0],
+                 attrs={"summary": text}, confidence=direct())
+    declare(ent, Link(target=eid, method="record-identity", tier=Tier.DIRECT,
+                      rationale="record carries its own identity",
+                      anchors=True, anchor_rank=5))
+    shaped.entities.append(ent)
+    shaped.events.append(Event(id=f"evt:{eid}", entity_id=eid, action=action,
+                               source=source, confidence=direct(), timestamp=timestamp))
+
+
+def test_records_from_unlike_sources_correlate_with_no_shared_key():
+    """Two records, two sources, no key of any kind — joined on text and time.
+
+    Written against sources that do not exist: the point of the link refactor is
+    that the correlator needs no adapter, no format and no vocabulary to do this.
+    If this ever requires a new module, the design has regressed.
+    """
+    from induction.adapters import Shaped
+    from induction.steps.correlate import correlate
+
+    shaped = Shaped()
+    # A spreadsheet cell: a bare date, no timezone.
+    _record(shaped, "job:J-1", "Acme Corp March retainer handover",
+            "2024-03-15T00:00:00", "excel:tracker", "delivered")
+    # An API record: offset-aware, and the client name spelled differently.
+    _record(shaped, "ledger:1012", "Acme Corporation March retainer",
+            "2024-03-20T00:00:00+00:00", "api:ledger", "invoiced")
+
+    corr = correlate(shaped)
+    assert len(corr.cases) == 1, corr.cases
+    case = next(iter(corr.cases.values()))
+    assert set(case.entity_ids) == {"job:J-1", "ledger:1012"}
+    assert case.confidence.tier.label == "heuristic"
+    # It matched the abbreviated client name, and says so.
+    assert "corp~corporation" in case.confidence.rationale
+
+
+def test_a_bare_date_and_an_offset_aware_timestamp_can_be_compared():
+    """Regression: mixing a spreadsheet (no timezone) with an API (offset-aware)
+    used to raise TypeError inside the proximity check — i.e. the engine crashed
+    on exactly the multi-source corpus it exists to handle. A naive value is read
+    as UTC for comparison only; nothing is written back."""
+    from datetime import timezone
+    from induction.steps.correlate import _dt
+
+    naive, aware = _dt("2024-03-15T00:00:00"), _dt("2024-03-20T00:00:00+00:00")
+    assert naive.tzinfo is timezone.utc and aware.tzinfo is not None
+    assert abs((naive - aware).days) == 5          # would previously raise
+    assert _dt(None) is None and _dt("not a date") is None

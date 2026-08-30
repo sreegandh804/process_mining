@@ -58,6 +58,11 @@ class TableSpec:
     event_columns: list[EventCol] = field(default_factory=list)
     status_column: Optional[str] = None
     attr_columns: list[str] = field(default_factory=list)
+    # Which column(s) hold free text a fuzzy join can read (a description, a
+    # note, a client name) — a name or a list of them. Copied to `summary`
+    # because that is an attribute name the correlator looks for; the sheet's own
+    # column names are arbitrary and the correlator must never learn them.
+    text_column: Optional[str | list[str]] = None
     # foreign keys: {"column": "invoice_id", "target_type": "invoice"}
     ref_columns: list[dict] = field(default_factory=list)
 
@@ -162,6 +167,15 @@ def load(spec: TableSpec, path: str | Path) -> Shaped:
     return out
 
 
+def _summary(spec, row: dict) -> str:
+    """The free text this row offers a fuzzy join, in the spec's column order."""
+    if not spec.text_column:
+        return ""
+    columns = ([spec.text_column] if isinstance(spec.text_column, str)
+               else list(spec.text_column))
+    return " ".join(str(row.get(c) or "").strip() for c in columns).strip()
+
+
 def _shape_row(spec, row, rownum, locator, people, seen_ids, out: Shaped) -> None:
     rid = (row.get(spec.id_column) or "").strip()
     snippet = " | ".join(f"{k}={v}" for k, v in row.items() if v)[:200]
@@ -200,6 +214,7 @@ def _shape_row(spec, row, rownum, locator, people, seen_ids, out: Shaped) -> Non
             attrs={
                 **{c: row.get(c, "") for c in spec.attr_columns},
                 "status": row.get(spec.status_column, "") if spec.status_column else "",
+                "summary": _summary(spec, row),
                 "references": refs,
                 "n_rows": 1,
             },
