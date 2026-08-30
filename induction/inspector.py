@@ -30,6 +30,7 @@ _ITEM_WORDS = {
     "issue": ("issue", "issues"), "commit": ("change", "changes"),
     "release": ("release", "releases"), "case": ("case", "cases"),
     "integration": ("integration", "integrations"), "ticket": ("ticket", "tickets"),
+    "email_thread": ("email thread", "email threads"), "email": ("email", "emails"),
 }
 
 
@@ -259,6 +260,10 @@ def _deviation(case, kind, canon, gaps, step_label):
 
 def _corpus_line(m, items) -> str:
     mf = m.manifest or {}
+    if mf.get("source_kind") == "email":
+        return (f"Read from <b>{mf.get('n_messages', '?')} emails</b> in {m.slug}. Nothing was "
+                f"entered by hand; the threads and who-did-what were worked out from the "
+                f"messages, and every line opens to the message it came from.")
     if mf.get("head"):
         return (f"Read from <b>{m.slug}</b> — {mf.get('n_commits', '?')} records of activity. "
                 f"Nothing was entered by hand; it was worked out from your own history, and "
