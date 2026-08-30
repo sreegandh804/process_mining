@@ -111,3 +111,54 @@ def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
         kinds=kinds, steps=label_result.steps, merges=label_result.merges,
         gaps=gaps, orphans=orphans,
     )
+
+
+def run_tabular_pipeline(sources, slug="tabular", profile=None,
+                         terminal_action="paid", corroborating_action="settled") -> InducedModel:
+    """The non-git path: a list of (TableSpec, path) spreadsheet sources through
+    the SAME order/label/segment/reject/orphan machinery, with the generic
+    identity/foreign-key correlator and generic gap detectors.
+
+    `sources` : list of (induction.adapters.tabular.TableSpec, path-to-csv-or-xlsx).
+    """
+    from induction.adapters import tabular
+    from induction.profiles import GENERIC_PROFILE
+    from induction.steps.correlate_generic import correlate_by_key
+    from induction.steps.gaps_generic import infer_missing_step_gaps, infer_reconciliation_gaps
+    from induction.steps.label import label as label_step
+    from induction.steps.order import order as order_step, order_observations
+
+    if profile is None:
+        profile = GENERIC_PROFILE
+
+    shaped = Shaped()
+    sheets = []
+    for spec, path in sources:
+        shaped.extend(tabular.load(spec, path))
+        sheets.append({"source": spec.source, "path": str(path)})
+
+    corr = correlate_by_key(shaped)
+    order_step(shaped, corr)
+    order_observations(shaped.observations, corr)
+
+    label_result = label_step(shaped, corr, profile)
+    kinds = segment(shaped, corr, profile)
+    apply_reject(kinds, profile)
+
+    gaps = infer_missing_step_gaps(corr, kinds)
+    gaps += infer_reconciliation_gaps(shaped, corr, kinds,
+                                      terminal_action=terminal_action,
+                                      corroborating_action=corroborating_action)
+    orphans = collect_orphans(shaped, corr)
+
+    manifest = {
+        "source_kind": "spreadsheet",
+        "sheets": sheets,
+        "n_rows": len([e for e in shaped.entities if e.type not in ("person", "orphan_row")]),
+    }
+    return InducedModel(
+        slug=slug, manifest=manifest, shaped=shaped, correlation=corr,
+        profile_id=getattr(profile, "id", "generic"),
+        kinds=kinds, steps=label_result.steps, merges=label_result.merges,
+        gaps=gaps, orphans=orphans,
+    )

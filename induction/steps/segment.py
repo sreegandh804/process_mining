@@ -41,9 +41,14 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
     per_case: dict[str, dict] = {}
     for case in corr.cases.values():
         evs = [events_by_id[e] for e in case.event_ids if e in events_by_id]
-        n = len(evs)
-        bot_n = sum(1 for e in evs if e.actor and is_bot.get(e.actor))
-        automated = n > 0 and bot_n > n / 2
+        # "Automated" means a machine touched it and no human did. This is
+        # domain-general and robust to blank actors (an unrecorded actor is
+        # unknown, not automated) — unlike a majority vote, which a `None`
+        # committer/merger would dilute.
+        actor_ids = [e.actor for e in evs if e.actor]
+        has_bot = any(is_bot.get(a) for a in actor_ids)
+        has_human = any(not is_bot.get(a) for a in actor_ids)
+        automated = has_bot and not has_human
         cf = profile.case_features(case, entities_by_id) or {}
         per_case[case.id] = {"automated": automated, "events": evs, "cf": cf}
         # generic structural key: (automated?, correlation anchor). A profile may

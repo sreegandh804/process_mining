@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from induction.emit import DISCLAIMERS, TIER_LEGEND, _stats
+from induction.emit import TIER_LEGEND, _stats, disclaimers_for
 from induction.pipeline import InducedModel
 
 _SAMPLE_CASES_PER_KIND = 4
@@ -53,7 +53,7 @@ def build_view(m: InducedModel) -> dict:
     return {
         "meta": {
             "slug": m.slug, "manifest": m.manifest, "profile": m.profile_id,
-            "tier_legend": TIER_LEGEND, "disclaimers": DISCLAIMERS,
+            "tier_legend": TIER_LEGEND, "disclaimers": disclaimers_for(m),
             "stats": _stats(m),
         },
         "kinds": kinds_view,
@@ -213,8 +213,14 @@ const D = JSON.parse(document.getElementById('data').textContent);
 const tierChip = c => c ? `<span class="chip ${c.tier}" title="${(c.rationale||'').replace(/"/g,'&quot;')}">${c.tier}</span>` : '';
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
 
+const _mf = D.meta.manifest || {};
+const _corpusDesc = _mf.head
+  ? `git history @ <code>${esc((_mf.head||'').slice(0,10))}</code> · ${_mf.n_commits||'?'} commits`
+  : (_mf.source_kind === 'spreadsheet'
+      ? `${(_mf.sheets||[]).length} spreadsheet${(_mf.sheets||[]).length===1?'':'s'} · ${_mf.n_rows||'?'} records`
+      : 'corpus');
 document.getElementById('subtitle').innerHTML =
-  `corpus <b>${esc(D.meta.slug)}</b> · git history @ <code>${esc((D.meta.manifest.head||'').slice(0,10))}</code> · ${D.meta.manifest.n_commits||'?'} commits · vocabulary: <b>${esc(D.meta.profile||'generic')}</b>`;
+  `corpus <b>${esc(D.meta.slug)}</b> · ${_corpusDesc} · vocabulary: <b>${esc(D.meta.profile||'generic')}</b>`;
 document.getElementById('legend').innerHTML = Object.entries(D.meta.tier_legend)
   .map(([t,desc])=>`<span><span class="chip ${t}">${t}</span> ${esc(desc)}</span>`).join('');
 const s = D.meta.stats;
@@ -250,7 +256,7 @@ function traceNode(step){
      ${step.actor?`<span class="muted">by ${esc(step.actor)}</span>`:'<span class="muted">actor unknown</span>'}
      ${step.timestamp?`<span class="muted">· ${esc(step.timestamp.slice(0,10))}</span>`:''}
      ${tierChip(step.link)}</div>
-     ${step.evidence?`<div class="ev">${esc(step.evidence.snippet||'')} <br>evidence: <code>${esc(step.evidence.locator)}</code> <span class="muted">(git show)</span></div>`:''}</div>`;
+     ${step.evidence?`<div class="ev">${esc(step.evidence.snippet||'')} <br>evidence: <code>${esc(step.evidence.locator)}</code></div>`:''}</div>`;
 }
 function gapNode(g){
   return `<div class="node inferred"><div class="row"><b>⤳ ${esc(g.kind)}</b> ${tierChip(g.confidence)} <span class="muted">inferred — off-system</span></div>
@@ -274,7 +280,7 @@ function kindView(k){
     <div class="variants">${k.variants.map(v=>`
       <div class="variant ${v.role}"><div class="row"><b>${v.frequency}×</b> <span>${esc(v.role)}</span></div>
         <div class="sig">${v.signature.map(esc).join(' → ')||'∅'}</div></div>`).join('')}</div>
-    ${k.samples.length?`<div class="muted" style="margin-top:6px">Example runs (evidence resolves to a git sha):</div>`:''}
+    ${k.samples.length?`<div class="muted" style="margin-top:6px">Example runs (every step resolves to its source record):</div>`:''}
     ${k.samples.map((c,i)=>caseView(c, i===0)).join('')}
   </div>`;
 }

@@ -32,9 +32,27 @@ DISCLAIMERS = [
     "Cost/value figures are NOT produced. The slots are exposed and empty.",
 ]
 
+TABULAR_DISCLAIMERS = [
+    "The corpus is spreadsheet exports. Work done in email, calls, or another "
+    "system never touched these sheets and is inferred from gaps — never asserted.",
+    "Correlation is on identity and foreign keys; an unresolved key is surfaced "
+    "for reconciliation, not silently joined.",
+    "Kinds are inferred by clustering and revisable — the data does not announce them.",
+    "Order is read from date columns. A row with a status but no dates is "
+    "`order: unknown`, not guessed; a blank actor stays unknown, never invented.",
+    "No amounts are invented. Monetary mismatches are surfaced as findings, not "
+    "computed into a headline figure.",
+]
+
+
+def disclaimers_for(m) -> list:
+    if (m.manifest or {}).get("source_kind") == "spreadsheet":
+        return TABULAR_DISCLAIMERS
+    return DISCLAIMERS
+
 TIER_LEGEND = {
     "direct": "read straight from the source (present as data)",
-    "joined": "deterministic join on a shared key (commit<->PR number, git DAG)",
+    "joined": "deterministic join on a shared key (an id / foreign key; git DAG)",
     "heuristic": "rule-based inference (reference similarity, actor+time proximity)",
     "model": "embedding / LLM inference (not built in the baseline)",
 }
@@ -57,7 +75,7 @@ def build_model(m: InducedModel) -> dict:
                              "data-derived rationales — structure is identical either way."
                              % m.profile_id),
             "tier_legend": TIER_LEGEND,
-            "what_it_cannot_conclude": DISCLAIMERS,
+            "what_it_cannot_conclude": disclaimers_for(m),
             "stats": _stats(m),
         },
         "process_definitions": [k.to_dict() for k in m.kinds],

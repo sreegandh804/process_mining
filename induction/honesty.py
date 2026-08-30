@@ -62,6 +62,8 @@ def collect_orphans(shaped: Shaped, corr: Correlation) -> list[Orphan]:
 def _orphan_reason(ent) -> str:
     if ent is None:
         return "record's entity is unknown"
+    if ent.attrs.get("reason"):
+        return ent.attrs["reason"]
     if ent.type == "commit":
         if ent.attrs.get("is_merge"):
             return ("merge commit with no 'Merge pull request #N' and no branch name "

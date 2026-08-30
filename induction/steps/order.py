@@ -26,6 +26,11 @@ _ACTION_ORDER = {"authored": 0, "co-authored": 0, "reviewed": 1, "committed": 2,
 
 def order(shaped: Shaped, corr: Correlation) -> None:
     events_by_id = {e.id: e for e in shaped.events}
+    # Emission order is the honest tie-break when two events share a timestamp
+    # (a spreadsheet row records several steps on the same date): each adapter
+    # emits a row's events in the source's own column order, so we preserve it
+    # rather than inventing an order from the id string.
+    seq = {e.id: i for i, e in enumerate(shaped.events)}
 
     for case in corr.cases.values():
         evs = [events_by_id[eid] for eid in case.event_ids if eid in events_by_id]
@@ -36,7 +41,7 @@ def order(shaped: Shaped, corr: Correlation) -> None:
             case.order_status = "unknown"
             continue
 
-        timed.sort(key=lambda e: (e.timestamp, _ACTION_ORDER.get(e.action, 9), e.id))
+        timed.sort(key=lambda e: (e.timestamp, _ACTION_ORDER.get(e.action, 9), seq.get(e.id, 0)))
         # Untimed events cannot be placed; we keep them, appended, and say so.
         case.ordered_event_ids = [e.id for e in timed] + [e.id for e in untimed]
 

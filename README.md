@@ -28,6 +28,15 @@ python run.py
 …or `make run`, which does all three. Then open **`out/inspector.html`** in a
 browser and read **`out/model.json`** for the complete artefact.
 
+**A non-git customer** (a firm with spreadsheets, no git) runs through the *same*
+engine — no clone, no network:
+
+```bash
+python run_tabular.py                       # samples/finance CSV, generic (unnamed)
+python run_tabular.py --profile accounting  # friendly names for this domain
+python run_tabular.py --xlsx                # read the .xlsx sheets (needs openpyxl)
+```
+
 Run the tests with `pytest` (or `make test`). The core suite is offline and
 stdlib-only; the held-out-slice tests activate once `pallets/click` is cached
 (`make heldout`).
@@ -210,6 +219,41 @@ concern (see below).
 
 ---
 
+## A second customer: spreadsheets (the thin, non-git end)
+
+The brief's hardest case is the customer at the thin end — "one document library
+and nothing else" — who most needs the system. To prove the engine is not
+git-shaped, `run_tabular.py` runs a small firm's **invoice approval & payment**
+process (an Excel/CSV export in `samples/finance/`) through the *same* pipeline —
+different domain, no code below the adapter changed.
+
+- **The adapter is spec-driven** (`adapters/tabular.py`): a `TableSpec` maps
+  columns to the model — which column is the identity, which are timestamped
+  events (and who performed them), which is the status, which are foreign keys.
+  A new tracker (tickets, onboarding, cases) is a new *spec*, not new code. CSV
+  is stdlib; `.xlsx` uses openpyxl if present.
+- **Each invoice row has a multi-date timeline** (raised → submitted → approved
+  → paid), so a row yields a real trace — and a *bank-payments* export
+  cross-references invoices (`settled`), correlated on the shared id (`joined`),
+  exactly like git ↔ changelog.
+- **The thin realities are first-class:** a blank date = the step isn't recorded
+  (no event, no invented time); a blank actor = unknown (never guessed); a row
+  with a status but no dates = an `Observation`, `order: unknown`; a row with no
+  id, or a payment for an invoice that doesn't exist, is **surfaced** (orphan /
+  unresolved reference), never dropped.
+- **It produces findings an operations director would act on**, from real
+  discontinuities, all rendered as inference:
+  - *invoices paid with no recorded approval* (a control breach) — the generic
+    "reached a late step without an earlier one the common path has" detector;
+  - *invoices marked paid in the tracker with no matching bank payment*, and *a
+    bank payment for an unknown invoice* — cross-source reconciliation;
+  - a recurring, zero-value, **system**-actor cluster flagged *"looks like a
+    process, isn't"* — by the same generic rule as the git bots.
+
+This is the whole thesis in miniature: **new source = new adapter (+ optional
+profile), same engine.** What is *not* built is the breadth of other adapters
+(mail, calendars, chat); each is the same shape of work as `tabular.py`.
+
 ## What it **cannot** conclude
 
 - **Anything about the issue/PR/review timeline directly.** The corpus is git.
@@ -266,13 +310,13 @@ Also stated-but-unbuilt (hooks are in place):
   gets states with `order: unknown` and correlation on whatever shared keys
   exist. The thin customer is the one who most needs the honesty machinery, which
   is why the `Observation`/`unknown`/orphan paths are first-class, not fixtures.
-- **A customer that isn't git at all.** The engine core is source-agnostic: it
-  only ever touches `Entity`/`Event`/`Observation`, and all domain vocabulary
-  lives in an adapter + a `Profile` (see above). Point it at a new source with no
-  profile and it still produces a coherent model — with honestly *unnamed* kinds.
-  What is **not** yet built is the set of *other adapters* (Excel/CSV, mail,
-  Slack); each is one adapter away, and the thin end is demonstrated today only
-  via the changelog.
+- **A customer that isn't git at all.** Built and shown: `run_tabular.py` runs a
+  firm's invoice tracker (CSV/Excel) + bank export through the same engine (see
+  "A second customer" above), producing real control and reconciliation findings
+  with honestly unnamed kinds by default. The core only ever touches
+  `Entity`/`Event`/`Observation`; domain vocabulary lives in an adapter + a
+  `Profile`. What is **not** yet built is the *breadth* of further adapters
+  (mail, calendars, chat) — each the same shape of work as `tabular.py`.
 - **What "actionable" means.** Not a prettier map. A finding is actionable when it
   carries the whole chain: *what actually happens → what it costs → where it
   breaks → what to change → who must agree → whether it worked after.* This engine
@@ -296,20 +340,23 @@ Also stated-but-unbuilt (hooks are in place):
 ## Repo layout
 
 ```
-ingest.py            corpus -> cached raw JSON (the only step that touches git)
-run.py               one command: induce -> out/model.json + out/inspector.html
+ingest.py            git corpus -> cached raw JSON (the only step that touches git)
+run.py               git path:     induce -> out/model.json + out/inspector.html
+run_tabular.py       spreadsheet path (samples/finance): same output, no git
+samples/finance/     the non-git demo corpus (invoices + payments, CSV & XLSX)
 induction/
   model.py           Entity / Event / Observation, Evidence, Confidence (tiers)
   refs.py            cross-reference extraction (+ the tier each kind earns)
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
-  profiles.py        where domain vocabulary lives (generic default; git overlay)
-  adapters/          git_history.py (thick), changelog.py (thin)
-  steps/             segment, correlate, order, variants, label, gaps
+  profiles.py        where domain vocabulary lives (generic default; git / accounting)
+  adapters/          git_history.py, changelog.py (git); tabular.py (CSV / Excel)
+  steps/             segment, order, variants, label; correlate (git DAG) +
+                     correlate_generic (id / foreign key); gaps + gaps_generic
   honesty.py         orphans, reject, (unknowns/divergence surfaced in emit)
-  pipeline.py        wires steps 0-6 into one InducedModel
+  pipeline.py        run_pipeline (git) and run_tabular_pipeline (spreadsheets)
   emit.py            InducedModel -> model.json
   inspector.py       InducedModel -> self-contained inspector.html
-tests/               golden fixture + ugly-record cases + held-out slice
+tests/               golden fixture + ugly-record cases + held-out slice + tabular
 ```
 
 Start with `model.py` (the substrate) and `steps/correlate.py` (the graded core);

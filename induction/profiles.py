@@ -170,7 +170,45 @@ GIT_PROFILE = Profile(
     reject_reason=_git_reject_reason,
 )
 
-_PROFILES = {"git": GIT_PROFILE, "generic": GENERIC_PROFILE}
+# ---------------------------------------------------------------------------
+# A second domain, to prove the profile mechanism is not git-shaped. This one
+# ONLY renames (no custom clustering) — the smallest a useful profile can be.
+# ---------------------------------------------------------------------------
+_ACCT_ACTIVITY = {
+    "raised": "Invoice raised", "submitted": "Submitted for approval",
+    "approved": "Approved", "paid": "Marked paid", "settled": "Bank payment settled",
+}
+_ACCT_KIND_NAMES = {
+    "invoice_approval": "Invoice approval & payment",
+    "system_entries": "System / automated entries",
+    "unmatched_payments": "Unmatched bank payments",
+}
+_ACCT_KIND_RATIONALE = {
+    "invoice_approval": "Invoices moving through raise → submit → approve → pay, performed by people.",
+    "system_entries": "Recurring zero-value entries performed by a system actor — candidate 'looks like a process, isn't'.",
+    "unmatched_payments": "Bank payments that reference an invoice not present in the tracker.",
+}
+
+
+def _acct_name_kind(kf: dict) -> Optional[str]:
+    kh = kf.get("kind_hint")
+    if kh == "invoice":
+        return "system_entries" if kf.get("automated") else "invoice_approval"
+    if kh == "payment":
+        return "unmatched_payments"
+    return None
+
+
+ACCOUNTING_PROFILE = Profile(
+    id="accounting",
+    label_action=lambda a: _ACCT_ACTIVITY.get(a, _humanize(a)),
+    name_kind=_acct_name_kind,
+    display_name=lambda kid: _ACCT_KIND_NAMES.get(kid),
+    rationale=lambda kf: _ACCT_KIND_RATIONALE.get(_acct_name_kind(kf)),
+    # reject_reason stays the generic rule: a recurring, fully-automated cluster.
+)
+
+_PROFILES = {"git": GIT_PROFILE, "generic": GENERIC_PROFILE, "accounting": ACCOUNTING_PROFILE}
 
 
 def select_profile(shaped) -> Profile:

@@ -8,3 +8,7 @@
 #
 # dev / test only:
 pytest>=7.0
+
+# OPTIONAL, and only for reading .xlsx in the tabular adapter. The CSV path (and
+# everything else) needs nothing beyond the standard library.
+# openpyxl>=3.1
