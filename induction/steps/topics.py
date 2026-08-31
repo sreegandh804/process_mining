@@ -177,7 +177,13 @@ def refine(case_texts: dict[str, str], n_corpus_cases: int,
         if sim.score < policy.min_score:
             continue
         graph.union(a, b)
-        joined_terms[(a, b)] = sim.shared
+        # Only the content words name the topic. `similar()` also matched
+        # identifiers — an address, a ticket number, a domain — and those are
+        # real evidence for the *join* but say nothing about the *subject*: two
+        # threads sharing 'vince.j.kaminski@enron.com' share a person, not a
+        # kind of work, and a kind called "713, com, v…@enron.com" tells a
+        # reader nothing. Keep them in the score, keep them out of the name.
+        joined_terms[(a, b)] = sim.shared_content
 
     components: dict[str, list[str]] = defaultdict(list)
     for cid in texts:

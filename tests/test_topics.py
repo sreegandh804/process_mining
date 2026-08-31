@@ -173,3 +173,23 @@ def test_refinement_repartitions_and_never_loses_a_run(mail_model):
     case_ids = [cid for k in mail_model.kinds for cid in k.case_ids]
     assert len(case_ids) == len(set(case_ids)), "a run must land in exactly one kind"
     assert set(case_ids) == set(mail_model.cases), "every run must land in some kind"
+
+
+def test_terms_name_a_subject_not_an_identifier():
+    """A kind called "713, com, v…@enron.com" tells a reader nothing.
+
+    Mail bodies are full of quoted headers, so identifiers are shared across
+    threads constantly. They are fair evidence for the join and useless as a
+    name: two threads sharing an address share a person, not a kind of work.
+    """
+    who = "vince.j.kaminski@enron.com"
+    texts = {}
+    for i in range(14):
+        texts[f"isda:{i}"] = f"{ISDA} number {i}\n----- Forwarded by {who} on 10/13/2001 07:13 AM"
+    for i in range(14):
+        texts[f"gas:{i}"] = f"{GAS} cycle {i}\n----- Forwarded by {who} on 10/13/2001 07:13 AM"
+    _, terms = refine(texts, n_corpus_cases=len(texts))
+    assert terms, "the two vocabularies should still separate"
+    flat = [t for group in terms.values() for t in group]
+    assert not [t for t in flat if "@" in t], flat
+    assert not [t for t in flat if t.isdigit()], flat
