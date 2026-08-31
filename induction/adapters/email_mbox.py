@@ -187,28 +187,48 @@ def _shape_message(msg: Message, locator: str, slug: str, source: str,
         confidence=direct(), evidence=[Evidence(source, locator, subject[:200])], raw=None)
     out.entities.append(ent)
 
-    # Deterministic thread key: the message this one replied to.
+    norm = _norm_subject(subject)
+
+    # Deterministic thread key: the message this one replied to. The strong union
+    # — it holds a thread together even when the subject was renamed mid-thread,
+    # and it is what keeps a real conversation at `joined`.
     if in_reply_to:
         declare(ent, Link(
             target=f"email:{slug}:{in_reply_to}", method="in-reply-to", tier=Tier.JOINED,
             rationale=f"In-Reply-To <{in_reply_to}>", locator=locator, snippet=subject[:120]))
-    # Fallback thread by normalised subject — only if nothing stronger claims it.
-    # NOT for automated senders: a daily notice with a fixed subject would fuse
-    # every day's copy into one fake "thread"; kept separate, N copies read as the
-    # recurring, produces-nothing pattern the reject rule is meant to catch.
-    norm = _norm_subject(subject)
-    if norm and not _is_bot(frm or ""):
-        declare(ent, Link(
-            target=f"thread:{slug}:{norm}", method="subject-thread", tier=Tier.HEURISTIC,
-            rationale=f"subject thread '{norm[:60]}'", locator=locator, snippet=subject[:120],
-            virtual=True, anchors=True, fallback=True,
-            anchor_attrs={"type": "email_thread", "subject": subject}))
-    else:
-        # An automated notice stands as its own instance (see above); many copies
-        # then cluster and get put to the "looks like a process, isn't?" test.
+
+    if _is_bot(frm or ""):
+        # An automated notice stands as its own instance: kept separate, many
+        # identical copies cluster and get put to the "looks like a process,
+        # isn't?" test, instead of a fixed daily subject fusing every day's copy
+        # into one fake "thread".
         declare(ent, Link(
             target=ent_id, method="standalone", tier=Tier.DIRECT,
             rationale="automated notice — its own instance", anchors=True))
+    else:
+        # A thread root — a message that replied to nothing — is a conversation in
+        # its own right, so it anchors its own case at first hand. Without this a
+        # clean In-Reply-To thread (size ≥ 2 the moment its first reply lands) never
+        # trips the size-1 subject fallback below, so nothing would claim it a run
+        # and the whole thread would vanish into the orphans. The root's claim is
+        # direct and the replies attach as `joined`, so the case reads `joined` —
+        # not the `heuristic` the subject fallback alone would give a real thread.
+        if not in_reply_to:
+            declare(ent, Link(
+                target=ent_id, method="thread-root", tier=Tier.DIRECT,
+                rationale="email thread starts here", locator=locator, snippet=subject[:120],
+                anchors=True, anchor_rank=3,
+                anchor_attrs={"type": "email_thread", "subject": subject}))
+        # Subject fallback — applied only to a message nothing stronger has threaded
+        # (a reply whose In-Reply-To header was lost, or a root we never saw). A
+        # fallback, so one stray message never fuses every thread that shares a
+        # word: it waits for the firm links to settle and groups what is still loose.
+        if norm:
+            declare(ent, Link(
+                target=f"thread:{slug}:{norm}", method="subject-thread", tier=Tier.HEURISTIC,
+                rationale=f"subject thread '{norm[:60]}'", locator=locator, snippet=subject[:120],
+                virtual=True, anchors=True, anchor_rank=6, fallback=True,
+                anchor_attrs={"type": "email_thread", "subject": subject}))
 
     action = "replied" if in_reply_to else ("forwarded" if _is_forward(subject) else "sent")
     out.events.append(Event(

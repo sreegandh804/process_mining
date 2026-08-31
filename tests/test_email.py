@@ -69,6 +69,37 @@ def test_automated_notices_cluster_and_are_flagged(mail):
     assert any(k.rejected for k in mail.kinds)
 
 
+def test_a_self_contained_thread_stands_as_its_own_joined_case():
+    """A clean In-Reply-To thread that correlates with nothing else must still be
+    a case — a real conversation, not orphans.
+
+    Regression: the subject fallback is size-1-gated, so a threaded conversation
+    (size >= 2 the moment its first reply lands) never tripped it. Nothing then
+    claimed the run, and the whole thread vanished into the orphans unless it
+    happened to fuzzy-join some other message — which every earlier fixture thread
+    did, hiding the hole. A real mailbox is mostly self-contained threads."""
+    msgs = [
+        _m("s1", "alice@corp.com", "Server migration plan", "Mon, 06 May 2024 09:00:00 -0700",
+           "Proposing we move the billing service to the new cluster next week."),
+        _m("s2", "bob@corp.com", "Re: Server migration plan", "Mon, 06 May 2024 11:00:00 -0700",
+           "Sounds good, I'll schedule the cutover.", irt="s1"),
+        _m("s3", "alice@corp.com", "Re: Server migration plan", "Tue, 07 May 2024 09:00:00 -0700",
+           "Done — cutover booked for Saturday.", irt="s2"),
+        # an unrelated singleton, so the corpus has another component it must NOT match
+        _m("u1", "carol@corp.com", "Coffee order", "Wed, 08 May 2024 09:00:00 -0700", "Flat white."),
+    ]
+    m = induce(email_mbox.shape(msgs, "acme-mail"), slug="acme-mail")
+
+    case = _case_of(m, "email:acme-mail:s1")
+    assert case is not None, "the thread vanished — no record claimed it a run"
+    assert {"email:acme-mail:s2", "email:acme-mail:s3"} <= set(case.entity_ids)
+    # deterministic threading, so the case reads `joined` — not the `heuristic` a
+    # subject fallback alone would stamp on it.
+    assert case.confidence.tier.label == "joined"
+    orphaned = {o.entity_id for o in m.orphans}
+    assert not ({f"email:acme-mail:{x}" for x in ("s1", "s2", "s3")} & orphaned)
+
+
 def test_no_actor_or_time_is_invented(mail):
     for e in mail.shaped.events:
         assert e.source.startswith("mail:")
