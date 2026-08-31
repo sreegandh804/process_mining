@@ -141,6 +141,22 @@ def demo_judge():
     ])
 
 
+def demo_activity_mapper():
+    """OFFLINE stand-in for the activity-mapping model, for `--demo`. Returns the
+    grouping a real model produces — artefact verbs across email/issue/PR folded
+    into the activities the process is made of (an issue 'opened' and an email
+    'sent' are both 'Raised'; a PR 'merged' is 'Shipped'). Live, swap in
+    `AnthropicActivityMapper`; the engine holds none of this vocabulary."""
+    from induction.abstraction import ScriptedActivityMapper
+    return ScriptedActivityMapper({
+        "email/sent": "Raised", "email/replied": "Discussed",
+        "issue/opened": "Raised", "issue/labeled": "Triaged",
+        "issue/commented": "Discussed", "issue/closed": "Resolved",
+        "pr/opened": "Fix proposed", "pr/review_requested": "Review requested",
+        "pr/reviewed": "Reviewed", "pr/merged": "Shipped", "pr/closed": "Resolved",
+    })
+
+
 def _m(mid, frm, subj, date, body, irt=None):
     h = (f"Message-ID: <{mid}>\nFrom: {frm}\nTo: team@northwind.com\n"
          f"Date: {date}\nSubject: {subj}\n")

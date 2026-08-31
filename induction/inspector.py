@@ -34,8 +34,9 @@ _ITEM_WORDS = {
 }
 
 
-def build_view(m: InducedModel, names: dict | None = None) -> dict:
+def build_view(m: InducedModel, names: dict | None = None, activities: dict | None = None) -> dict:
     names = names or {}
+    activities = activities or {}
     shaped = m.shaped
     events_by_id = {e.id: e for e in shaped.events}
     obs_by_id = {o.id: o for o in shaped.observations}
@@ -68,7 +69,8 @@ def build_view(m: InducedModel, names: dict | None = None) -> dict:
     dev_meta = {}
     for case in m.cases.values():
         kind = kind_of_case.get(case.id)
-        rv = _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, gaps_by_case)
+        rv = _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
+                       gaps_by_case, activities)
         runs.append(rv)
         dev_counter[rv["dev_key"]] += 1
         dev_meta[rv["dev_key"]] = (rv["dev_label"], rv["dev_attn"])
@@ -210,13 +212,23 @@ def _run_title(case, ents, disp: str) -> str:
     return disp
 
 
-def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, gaps_by_case) -> dict:
+def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
+              gaps_by_case, activities=None) -> dict:
     canon = _canon(kind)
-    pos = {a: i for i, a in enumerate(canon)}
     gaps = gaps_by_case.get(case.id, [])
+    activities = activities or {}
 
-    # recorded steps, in the run's actual order
-    recorded = []
+    def _activity(ev) -> str:
+        """The activity a verb realises — the AI map when present, else the verb's
+        own label. The map is what turns 'issue opened' + 'email sent' into one
+        'Raised' step; without it we show the artefact's own verb, claiming no
+        abstraction we did not earn."""
+        artefact = ents[ev.entity_id].type if ev.entity_id in ents else "record"
+        return activities.get(f"{artefact}/{ev.action}") or step_label(ev.action)
+
+    # artefacts, in the run's real order — the evidence that will sit under the
+    # activities. Each keeps its own verb, time, owner and source locator.
+    arts = []
     actors = Counter()
     for rid in case.ordered_event_ids:
         if rid in events_by_id:
@@ -224,40 +236,56 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, g
             who = pname.get(ev.actor) if ev.actor else None
             if who:
                 actors[who] += 1
-            recorded.append({
-                "name": step_label(ev.action), "when": (ev.timestamp or "").split("T")[0] or "—",
+            art_type = ents[ev.entity_id].type if ev.entity_id in ents else "record"
+            arts.append({
+                "activity": _activity(ev),
+                "artefact": _ITEM_WORDS.get(art_type, (art_type, art_type))[0],
+                "verb": step_label(ev.action),
+                "when": (ev.timestamp or "").split("T")[0] or "—",
                 "who": who, "inferred": False, "note": "",
                 "src": ev.evidence[0].locator if ev.evidence else "",
-                "pos": pos.get(ev.action, 99),
+                "src_kind": _SRC_WORD.get(ev.source.split(":")[0], ev.source.split(":")[0]),
             })
         elif rid in obs_by_id:
             ob = obs_by_id[rid]
-            recorded.append({
-                "name": "Recorded state", "when": (ob.seen_at or "").split("T")[0] or "no date",
-                "who": None, "inferred": False,
-                "note": str(ob.state.get("status", "") or ob.state.get("text", ""))[:80],
-                "src": ob.evidence[0].locator if ob.evidence else "", "pos": 99,
+            arts.append({
+                "activity": "State recorded", "artefact": "record", "verb": "Recorded state",
+                "when": (ob.seen_at or "").split("T")[0] or "no date", "who": None,
+                "inferred": False, "note": str(ob.state.get("status", "") or ob.state.get("text", ""))[:80],
+                "src": ob.evidence[0].locator if ob.evidence else "",
+                "src_kind": _SRC_WORD.get(ob.source.split(":")[0], ob.source.split(":")[0]),
             })
 
-    # inferred (missing / unmatched) steps
+    # Fold consecutive artefacts that realise the SAME activity into one step; the
+    # artefacts become that step's evidence. THIS is the process — a spine of
+    # activities — with the systems' records hanging beneath, not the raw verbs.
+    nodes: list[dict] = []
+    for it in arts:
+        if nodes and nodes[-1]["name"] == it["activity"]:
+            nodes[-1]["arts"].append(it)
+        else:
+            nodes.append({"name": it["activity"], "arts": [it]})
+    for n in nodes:
+        whens = [a["when"] for a in n["arts"] if a["when"] not in ("—", "no date")]
+        n["when"] = min(whens) if whens else "—"
+        n["sources"] = sorted({a["src_kind"] for a in n["arts"] if a["src_kind"]})
+        n["n"] = len(n["arts"])
+
+    # inferred (missing / off-system) steps — the confidently-incomplete part
     inferred = []
     for g in gaps:
         if g.kind == "missing_expected_step":
             act = g.id.split(":")[-1]
             inferred.append({"name": step_label(act), "when": "not in the records",
-                             "who": None, "inferred": True, "note": "expected here, no record",
-                             "src": (g.evidence[0].locator if g.evidence else ""),
-                             "pos": pos.get(act, 98)})
+                             "note": "expected here, no record",
+                             "src": (g.evidence[0].locator if g.evidence else "")})
         elif g.kind == "reconciliation":
-            inferred.append({"name": "No matching record", "when": "—", "who": None,
-                             "inferred": True, "note": g.description[:90],
-                             "src": (g.evidence[0].locator if g.evidence else ""), "pos": 100})
-
-    timeline = sorted(recorded + inferred, key=lambda s: (s["pos"], 1 if s["inferred"] else 0))
+            inferred.append({"name": "No matching record", "when": "—",
+                             "note": g.description[:90],
+                             "src": (g.evidence[0].locator if g.evidence else "")})
 
     dev_key, dev_label, dev_attn = _deviation(case, kind, canon, gaps, step_label)
 
-    # a stable, human display id + status
     a = case.anchor
     disp = (f"#{a['number']}" if "number" in a else a.get("key") or a.get("branch")
             or case.id.replace("case:", ""))
@@ -268,7 +296,7 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, g
             status = e.attrs["status"]
             break
     if not status:
-        status = (timeline[-1]["name"] if timeline else "—")
+        status = (nodes[-1]["name"] if nodes else "—")
 
     tier = case.confidence.tier.label
     chip_word, chip_class = _TIER_CHIP.get(tier, ("", ""))
@@ -279,7 +307,8 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, g
         "title": _run_title(case, ents, disp),
         "actor": (actors.most_common(1)[0][0] if actors else "—"),
         "status": status,
-        "path": " → ".join(s["name"] for s in timeline if not s["inferred"]) or "—",
+        # the spine is the activities, not the raw verbs
+        "path": " → ".join(n["name"] for n in nodes) or "—",
         "dev_key": dev_key, "dev_label": dev_label, "dev_attn": dev_attn,
         # Honesty on the face of the row: an inferred join wears a chip and, when
         # it is the model tier, the model's own reason; a deterministic run wears
@@ -287,7 +316,7 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, g
         "tier": tier, "chip_word": chip_word, "chip_class": chip_class,
         "why": (case.confidence.rationale or "") if tier in ("heuristic", "model") else "",
         "sources": sources, "cross": len(sources) > 1,
-        "timeline": timeline,
+        "activities": nodes, "inferred": inferred,
     }
 
 
@@ -324,10 +353,11 @@ def _corpus_line(m, items) -> str:
             f"worked out from your own records, and every line opens to the row it came from.")
 
 
-def write_html(m: InducedModel, path: str | Path, names: dict | None = None) -> Path:
+def write_html(m: InducedModel, path: str | Path, names: dict | None = None,
+               activities: dict | None = None) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    view = build_view(m, names)
+    view = build_view(m, names, activities)
     path.write_text(_TEMPLATE.replace("/*DATA*/", json.dumps(view, default=str)))
     return path
 
@@ -388,6 +418,12 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .tchip.t-ai{color:var(--accent);background:var(--accent-soft);border:1px dashed #b8ccf5}
   .xchip{display:inline-block;font-size:10px;font-weight:600;color:var(--ink-2);background:#eef1f5;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle}
   .why{font-size:12.5px;color:var(--accent);background:var(--accent-soft);border-radius:8px;padding:8px 12px;margin:2px 20px 10px}.why b{color:var(--ink)}
+  .actnode{padding:2px 20px 6px}.actnode+.actnode{border-top:1px solid var(--line);padding-top:9px;margin-top:5px}
+  .acth{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .actn{font-weight:700;font-size:14px;color:var(--ink)}.actnode.inf .actn{color:var(--attn)}
+  .actm{font-size:11.5px;color:var(--ink-3)}
+  .arts{margin:5px 0 0}
+  .art{font-size:10.5px;color:var(--ink-2);background:#eef1f5;border-radius:4px;padding:0 6px;margin-left:6px;font-weight:600}
   .detail td{padding:0;background:#fbfcfd}
   .tl{padding:14px 20px 16px}.tl .tlh{font-size:11.5px;color:var(--ink-3);margin-bottom:10px;font-family:var(--mono)}
   .ev{display:grid;grid-template-columns:190px 1fr auto;gap:12px;align-items:baseline;padding:6px 0 6px 16px;border-left:2px solid var(--line);margin-left:4px;position:relative}
@@ -458,11 +494,18 @@ function render(){
     if(q && !((r.id+' '+r.title+' '+r.actor+' '+r.status).toLowerCase().includes(q))) return false;
     return true;
   });
+  const art = a=>`<div class="ev ${a.inferred?'inf':''}">
+      <span class="en">${esc(a.verb)}${a.artefact?`<span class="art">${esc(a.artefact)}</span>`:''}</span>
+      <span class="ed">${esc(a.when)}${a.who?' · '+esc(a.who):' · owner not recorded'}${a.note?' — '+esc(a.note):''}</span>
+      <span class="src">${esc(a.src)}</span></div>`;
   rowsEl.innerHTML = list.map((r,i)=>{
-    const tl = r.timeline.map(s=>`<div class="ev ${s.inferred?'inf':''}">
-        <span class="en">${esc(s.name)}${s.inferred?'<span class="inftag">inferred</span>':''}</span>
-        <span class="ed">${esc(s.when)}${s.who?' · '+esc(s.who):(s.inferred?'':' · owner not recorded')}${s.note?' — '+esc(s.note):''}</span>
-        <span class="src">${esc(s.src)}</span></div>`).join('');
+    // the spine is the activities; the artefacts hang beneath as the evidence
+    const acts = r.activities.map(n=>`<div class="actnode">
+        <div class="acth"><span class="actn">${esc(n.name)}</span><span class="actm">${esc(n.when)}${n.sources.length?' · '+n.sources.map(esc).join(' + '):''} · ${n.n} artefact${n.n===1?'':'s'}</span></div>
+        <div class="arts">${n.arts.map(art).join('')}</div></div>`).join('');
+    const inf = r.inferred.length?`<div class="actnode inf">
+        <div class="acth"><span class="actn">Not in any system</span><span class="actm">off-system or missing — inferred, never asserted</span></div>
+        <div class="arts">${r.inferred.map(s=>`<div class="ev inf"><span class="en">${esc(s.name)}<span class="inftag">inferred</span></span><span class="ed">${esc(s.when)}${s.note?' — '+esc(s.note):''}</span><span class="src">${esc(s.src)}</span></div>`).join('')}</div></div>`:'';
     const chip = r.chip_word?` <span class="tchip ${esc(r.chip_class)}">${esc(r.chip_word)}</span>`:'';
     const xchip = r.cross?` <span class="xchip">${r.sources.map(esc).join(' + ')}</span>`:'';
     return `<tr class="run" data-i="${i}"><td><div class="rtitle">${esc(r.title)}</div>
@@ -470,8 +513,8 @@ function render(){
         <td class="path-c">${esc(r.path)}</td>
         <td><span class="dev ${r.dev_attn?'attn':''}">${esc(r.dev_label)}</span></td></tr>
       <tr class="detail" id="d${i}" hidden><td colspan="4">
-        <div class="tl"><div class="tlh">${esc(r.id)} · ${esc(r.status)} — each step resolves to its source record</div>
-          ${r.why?`<div class="why"><b>Why these are one ${esc(V.meta.item)}:</b> ${esc(r.why)}</div>`:''}${tl}</div></td></tr>`;
+        <div class="tl"><div class="tlh">${esc(r.id)} · ${esc(r.status)} — the process, and the artefacts that evidence each step</div>
+          ${r.why?`<div class="why"><b>Why these are one ${esc(V.meta.item)}:</b> ${esc(r.why)}</div>`:''}${acts}${inf}</div></td></tr>`;
   }).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--ink-3);padding:22px">None match.</td></tr>`;
   rowsEl.querySelectorAll('tr.run').forEach(tr=>tr.onclick=()=>{
     const d=document.getElementById('d'+tr.dataset.i); d.hidden=!d.hidden;});

@@ -34,6 +34,7 @@ import json
 import sys
 from pathlib import Path
 
+from induction.abstraction import AnthropicActivityMapper, infer_activities
 from induction.adapters import Shaped, email_mbox, github_api
 from induction.emit import write_json
 from induction.inspector import write_html
@@ -116,9 +117,22 @@ def main(argv=None) -> int:
                manifest={"source_kind": "combined", "n_records": n_records})
     names = infer_names(m, enable=(args.names == "llm"))
 
+    # AI-first process abstraction: the model groups the artefact verbs into the
+    # activities the process is made of. Demo uses an offline stand-in; a real
+    # semantic run uses the Anthropic mapper; with neither, no abstraction is
+    # claimed and the inspector shows the raw artefacts.
+    if args.demo:
+        from tests.combined_fixture import demo_activity_mapper
+        mapper = demo_activity_mapper()
+    elif args.semantic in ("llm", "hybrid"):
+        mapper = AnthropicActivityMapper()
+    else:
+        mapper = None
+    activities = infer_activities(m, mapper)
+
     out = Path(args.out_dir)
     write_json(m, out / "model.json")
-    write_html(m, out / "inspector.html", names=names)
+    write_html(m, out / "inspector.html", names=names, activities=activities)
 
     cross = [c for c in m.cases.values()
              if len({("mail" if e.startswith("email:") else "sys") for e in c.entity_ids}) > 1]
