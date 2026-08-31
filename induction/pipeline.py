@@ -158,7 +158,8 @@ def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
 
 
 def run_tabular_pipeline(sources, slug="tabular", profile=None,
-                         terminal_action="paid", corroborating_action="settled") -> InducedModel:
+                         terminal_action="paid", corroborating_action="settled",
+                         max_cases=None) -> InducedModel:
     """Spreadsheets -> induced model.
 
     `sources` : list of (induction.adapters.tabular.TableSpec, path-to-csv-or-xlsx).
@@ -168,7 +169,12 @@ def run_tabular_pipeline(sources, slug="tabular", profile=None,
     shaped = Shaped()
     sheets = []
     for spec, path in sources:
-        shaped.extend(tabular.load(spec, path))
+        # The two tabular shapes read differently and produce the same records:
+        # one row per case with a column per step, or one row per event.
+        if isinstance(spec, tabular.EventLogSpec):
+            shaped.extend(tabular.load_event_log(spec, path, max_cases=max_cases))
+        else:
+            shaped.extend(tabular.load(spec, path))
         sheets.append({"source": spec.source, "path": str(path)})
 
     manifest = {

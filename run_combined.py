@@ -34,7 +34,8 @@ import json
 import sys
 from pathlib import Path
 
-from induction.abstraction import AnthropicActivityMapper, infer_activities
+from induction.abstraction import (AnthropicActivityMapper, AnthropicRecordClassifier,
+                                   infer_activities)
 from induction.adapters import Shaped, email_mbox, github_api
 from induction.emit import write_json
 from induction.inspector import write_html
@@ -79,6 +80,39 @@ def _load_real(gh_path: Path, gh_slug: str | None,
     return shaped, slug
 
 
+def _require_a_key(args) -> None:
+    """Refuse to produce a run labelled `semantic=llm` that had no model in it.
+
+    Every AI path here returns `{}` on a missing key — deliberately, so a missing
+    key can never break a run. Composed, that politeness becomes a lie: the
+    header prints `semantic=llm`, the model tier, the namer and the record
+    reader all silently no-op, and the output is a deterministic run wearing an
+    AI label. That happened on a real 400-message corpus and cost an afternoon.
+    So: asked for the model, say plainly when it cannot be had, and stop.
+    """
+    import os
+    wants_model = args.semantic in ("llm", "hybrid") or args.names == "llm"
+    if args.demo or not wants_model:
+        return
+    problems = []
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        problems.append("ANTHROPIC_API_KEY is not set in this shell")
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        problems.append("the Anthropic SDK is missing (pip install anthropic)")
+    if not problems:
+        return
+    print("[run] you asked for the model tier, and it cannot run:", file=sys.stderr)
+    for p in problems:
+        print(f"         - {p}", file=sys.stderr)
+    print("       Refusing rather than emitting a deterministic run labelled "
+          "'semantic=llm'.\n"
+          "       Fix the above, or re-run with --semantic off for the "
+          "deterministic model.", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -93,6 +127,8 @@ def main(argv=None) -> int:
     ap.add_argument("--names", choices=["off", "llm"], default="off")
     ap.add_argument("--out-dir", default="out")
     args = ap.parse_args(argv)
+
+    _require_a_key(args)
 
     if args.demo:
         shaped, slug = _load_demo()
@@ -127,14 +163,18 @@ def main(argv=None) -> int:
     # activities the process is made of. Demo uses an offline stand-in; a real
     # semantic run uses the Anthropic mapper; with neither, no abstraction is
     # claimed and the inspector shows the raw artefacts.
+    # Two tiers. The mapper reads the corpus VOCABULARY — right where a verb is
+    # the activity (git, a tracker). The classifier reads each RECORD, and runs
+    # only where the vocabulary turned out to be transport rather than meaning
+    # (a mailbox: 761 threads, one verb, one useless "Communicated" step).
     if args.demo:
-        from tests.combined_fixture import demo_activity_mapper
-        mapper = demo_activity_mapper()
+        from tests.combined_fixture import demo_activity_mapper, demo_record_classifier
+        mapper, classifier = demo_activity_mapper(), demo_record_classifier()
     elif args.semantic in ("llm", "hybrid"):
-        mapper = AnthropicActivityMapper()
+        mapper, classifier = AnthropicActivityMapper(), AnthropicRecordClassifier()
     else:
-        mapper = None
-    activities = infer_activities(m, mapper)
+        mapper = classifier = None
+    activities = infer_activities(m, mapper, classifier)
 
     out = Path(args.out_dir)
     write_json(m, out / "model.json")

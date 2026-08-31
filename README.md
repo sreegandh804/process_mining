@@ -106,7 +106,9 @@ Everything becomes one of three canonical types **before** any mining
 direct    read straight from the source (present as data)
 joined    deterministic join on a shared key (commit↔PR number, the git DAG)
 heuristic rule-based inference (reference similarity, actor+time proximity)
-model     embedding / LLM inference   (the documented upgrade — not built)
+model     LLM inference — same-work judgement, and reading an activity
+          out of a record whose verb carries none (opt-in; embeddings
+          remain the unbuilt rung behind the same seam)
 ```
 
 A claim's tier *is* its confidence. The confidence of a chain of inferences is
@@ -115,6 +117,36 @@ the golden fixture — never invented.
 
 `Evidence` carries a `locator` (a commit sha, `CHANGES.rst:L120`) that resolves
 back to the raw artefact, so any claim can be checked by eye.
+
+### What the pipeline builds on top (`induction/process.py`)
+
+| model | id | holds |
+|---|---|---|
+| **ProcessKind** — *a process* | `kind_1` … or a profile name (`code_contribution`) | `case_ids`, `variants`, `dfg`, `steps`, `rejected` + reason |
+| **Case** — *one run* | `case:pr:15` · `case:email:{slug}:{msgid}` · `case:invoice:INV-1001` | `ordered_event_ids`, `order_status`, `trace_signature`, `anchor`, `confidence` |
+| **Variant** — *one observed path* | keyed by its `signature` | `signature`, `frequency`, `case_ids`, `role` = common / exception / one-off |
+| **Step** — *an activity, corpus-wide* | `step:{action}` | `name` (display), `action` (raw verb), `member_ids`, `event_ids` |
+| **Gap** — *what is absent* | `gap:{kind}:{case}:{action}` | `missing_expected_step` / `reconciliation` / `off_system_review`; always `heuristic` |
+| **Orphan** — *what joined nothing* | keyed by `record_id` | the reason it joined nothing |
+
+Two naming layers sit on a step, and they are not the same claim:
+
+- **`Step.action`** — the artefact's own verb (`authored`, `approved`, `sent`),
+  tier `direct`, because the source said it.
+- **the activity** on `Case.trace_signature` — what the abstraction layer
+  concluded the record *realises* (`Approved`), tier `model`, carrying the span
+  of text it read. Consecutive records realising one activity fold into a single
+  step with the artefacts listed beneath it.
+
+```
+Entity ──has──▶ Event ──correlate──▶ Case ──segment──▶ ProcessKind
+                  │                    │                  │
+              Evidence          trace_signature      variants · gaps
+```
+
+Every one of those carries a `Confidence`, and a `Case` reports its **weakest
+link** — a run assembled across a `model` join reads `model`, even though each
+event in it is `direct`.
 
 ---
 
@@ -286,8 +318,13 @@ different domain, no code below the adapter changed.
     process, isn't"* — by the same generic rule as the git bots.
 
 This is the whole thesis in miniature: **new source = new adapter (+ optional
-profile), same engine.** What is *not* built is the breadth of other adapters
-(mail, calendars, chat); each is the same shape of work as `tabular.py`.
+profile), same engine.** Mail is built too (`adapters/email_mbox.py` — maildir,
+mbox or CSV), and `tabular.py` now reads both table shapes: a *wide* tracker
+export (a row is a case, a column is a step) and a *long* event log (a row is an
+event — the field's standard, and the only shape that can represent a repeated
+step). `detect()` proposes which shape a file is and prints what it measured;
+`--case-column`/`--activity-column` override it. Calendars and chat remain
+unbuilt; each is the same shape of work.
 
 ## What it **cannot** conclude
 
@@ -320,11 +357,23 @@ and each would enter as a lower, clearly-marked tier:
   (`model` tier) and slot in behind the same `similar()` signature; that is
   still unbuilt, deliberately, because the transparent tier is auditable and an
   embedding is not.
-- **Segment / Label** — embeddings to *propose* finer kind-boundaries and to
-  cluster equivalent activities; an LLM to *name* activities and to judge "are
-  these two the same step?". **Guardrail:** the LLM may name and judge
-  equivalence only — never correlation or ordering, or it will hallucinate a
-  plausible process that never ran. The skeleton stays deterministic.
+- ~~**Segment / Label** — finer kind-boundaries; an LLM to name activities and
+  judge "are these two the same step?".~~ **Built**, in two pieces, each gated on
+  a measurement rather than a source name:
+  - `steps/topics.py` splits a kind by *subject* when structure said nothing —
+    fired only where one structural cluster is ≥90% of the corpus (pallets/flask
+    partitions 49/24/16/10/1% and is untouched; a mailbox is 100% and is split).
+    Deterministic, IDF token overlap, and every kind names the words that made it.
+  - `abstraction.py` reads the activity out of the record where the verb is only
+    transport — a mailbox records `sent` and nothing else. Gated on median
+    records-per-activity ≥ 2.0 (finance 1.00, flask 1.00–1.33, a mailbox 2.00).
+    Each reading quotes the span it came from; a record it will not commit to
+    keeps its raw verb and is counted as unclassified.
+
+  **The guardrail held:** the model may name and judge equivalence only. It
+  labels a record that exists; the deterministic detector finds what is absent.
+  Embeddings remain unbuilt behind `similar()` — the transparent tier is
+  auditable and an embedding is not.
 - **Gaps** — a model to propose *which* off-system step a discontinuity implies,
   beyond the two structural rules built here.
 
@@ -354,8 +403,8 @@ Also stated-but-unbuilt (hooks are in place):
   "A second customer" above), producing real control and reconciliation findings
   with honestly unnamed kinds by default. The core only ever touches
   `Entity`/`Event`/`Observation`; domain vocabulary lives in an adapter + a
-  `Profile`. What is **not** yet built is the *breadth* of further adapters
-  (mail, calendars, chat) — each the same shape of work as `tabular.py`.
+  `Profile`. Mail and long-format event logs are built too; calendars and chat
+  are not — each the same shape of work as `tabular.py`.
 - **What "actionable" means.** Not a prettier map. A finding is actionable when it
   carries the whole chain: *what actually happens → what it costs → where it
   breaks → what to change → who must agree → whether it worked after.* This engine
@@ -384,6 +433,9 @@ ingest_github.py     GitHub Issues/PR API -> cached raw JSON (needs a token)
 run.py               git path:     induce -> out/model.json + out/inspector.html
                      (--with-github adds the Issues/PR corpus to the same run)
 run_tabular.py       spreadsheet path (samples/finance): same output, no git
+                     (--file DETECTS the shape of any CSV/XLSX and reads it)
+run_combined.py      several sources at once (GitHub + a mailbox), + the model tier
+run_email.py         a mailbox on its own
 samples/finance/     non-git demo corpus (invoices + payments, CSV & XLSX)
 samples/grants/      a second non-git corpus (a grant-making tracker)
 induction/
@@ -393,9 +445,14 @@ induction/
   links.py           the link vocabulary adapters declare into (the correlation seam)
   text.py            token similarity for the fuzzy pass (stdlib, IDF, auditable)
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
+  abstraction.py     artefact verbs -> activities: the verb map, and (where the verb
+                     is only transport) reading the record itself
+  semantic.py        the model tier's judge/embedder seams (opt-in, --semantic llm)
   profiles.py        where domain vocabulary lives (generic default; git / accounting)
-  adapters/          git_history.py, changelog.py, github_api.py, tabular.py
-  steps/             segment, order, variants, label; correlate (ONE correlator,
+  adapters/          git_history.py, changelog.py, github_api.py, email_mbox.py,
+                     tabular.py (wide tracker exports AND long event logs)
+  steps/             segment (+ topics: kinds by subject where structure said
+                     nothing), order, variants, label; correlate (ONE correlator,
                      every source); gaps + gaps_generic
   honesty.py         orphans, reject, (unknowns/divergence surfaced in emit)
   pipeline.py        induce() (shared core) + thin per-source loaders

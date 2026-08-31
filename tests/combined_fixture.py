@@ -157,6 +157,23 @@ def demo_activity_mapper():
     })
 
 
+def demo_record_classifier():
+    """OFFLINE stand-in for the record-reading model, for ``--demo``.
+
+    The verb map can only ever say what `email/sent` means; this says what each
+    *message* does, which is the only way a mailbox yields more than one step.
+    Phrase rules stand in for the model's reading and return the phrase they
+    matched as the span, exactly as the real classifier returns the text it read.
+    A message no rule matches is omitted — the abstention is the honest half.
+    """
+    from induction.abstraction import ScriptedRecordClassifier
+    return ScriptedRecordClassifier([
+        ("Reported",  ["keeps getting", "can't download", "support ticket", "signed out"]),
+        ("Diagnosed", ["reproduced", "it's buffering", "the trigger"]),
+        ("Agreed",    ["fine waiting", "no need to hotfix"]),
+    ])
+
+
 def demo_namer(payload):
     """OFFLINE stand-in for the naming model, for `--demo`. Names each induced
     KIND from its own features (adapting to whatever ids the segmenter produced),

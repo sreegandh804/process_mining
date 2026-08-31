@@ -53,7 +53,7 @@ def infer_names(model, enable: bool = False, api_model: str | None = None, namer
     payload = _payload(model)
     if namer is not None:
         try:
-            return _clean(namer(payload))
+            return _disambiguate(_clean(namer(payload)), model)
         except Exception as e:  # naming is a convenience; never break the run
             print(f"[names] namer skipped ({type(e).__name__}: {e})")
             return {}
@@ -74,10 +74,45 @@ def infer_names(model, enable: bool = False, api_model: str | None = None, namer
             messages=[{"role": "user", "content": _prompt(payload)}],
         )
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-        return _clean(_parse(text))
+        return _disambiguate(_clean(_parse(text)), model)
     except Exception as e:  # naming is a convenience; never break the run
         print(f"[names] LLM naming skipped ({type(e).__name__}: {e})")
         return {}
+
+
+def _disambiguate(names: dict, model) -> dict:
+    """Two kinds may not wear the same name.
+
+    A model handed two clusters it cannot tell apart returns one name twice, and
+    the reader sees two identical cards with no way to know which is which — that
+    happened on a real mailbox ("Send then forward email", twice). The prompt asks
+    for distinct names; this guarantees it. The tie is broken by what actually
+    separated the kinds — their own subject terms — falling back to a numeral only
+    when there is nothing better to say.
+    """
+    kinds = (names or {}).get("kinds") or {}
+    if not kinds:
+        return names
+    terms_of = {k.id: list(k.features.get("topic_terms", [])) for k in model.kinds}
+    taken: set[str] = set()
+    out: dict[str, str] = {}
+    for kid, name in kinds.items():
+        if name not in taken:
+            out[kid], _ = name, taken.add(name)
+            continue
+        for term in terms_of.get(kid, []):
+            candidate = f"{name} ({term})"
+            if candidate not in taken:
+                break
+        else:
+            n = 2
+            while f"{name} ({n})" in taken:
+                n += 1
+            candidate = f"{name} ({n})"
+        out[kid] = candidate
+        taken.add(candidate)
+    names["kinds"] = out
+    return names
 
 
 def _payload(model) -> dict:
@@ -103,6 +138,10 @@ def _payload(model) -> dict:
             "n_runs": len(k.case_ids),
             "activities_in_order": k.features.get("dominant_actions", k.steps),
             "automated": bool(k.features.get("automated")),
+            # What the cluster is ABOUT. Without this the model can only see the
+            # verb sequence, and names a mail cluster "Send then forward email" —
+            # the transport, not the work.
+            "subject_terms": k.features.get("topic_terms", []),
             "examples": examples,
         })
     return {"activities": actions, "kinds": kinds}
@@ -111,6 +150,11 @@ def _payload(model) -> dict:
 def _prompt(payload: dict) -> str:
     return (
         "Here is a process model discovered from a company's own records.\n\n"
+        "Name each kind for the WORK IT DOES — read its subject_terms and examples. "
+        "Never name it after the verb sequence: 'Send then forward email' describes "
+        "how a message travelled, not what anyone was doing. Every kind must get a "
+        "DIFFERENT name; if two look alike, their subject_terms are what separate "
+        "them.\n\n"
         + json.dumps(payload, indent=2)
         + "\n\nReturn JSON exactly like:\n"
         '{\n'
