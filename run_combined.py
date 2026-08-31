@@ -34,7 +34,8 @@ import json
 import sys
 from pathlib import Path
 
-from induction.abstraction import AnthropicActivityMapper, infer_activities
+from induction.abstraction import (AnthropicActivityMapper, AnthropicRecordClassifier,
+                                   infer_activities)
 from induction.adapters import Shaped, email_mbox, github_api
 from induction.emit import write_json
 from induction.inspector import write_html
@@ -127,14 +128,18 @@ def main(argv=None) -> int:
     # activities the process is made of. Demo uses an offline stand-in; a real
     # semantic run uses the Anthropic mapper; with neither, no abstraction is
     # claimed and the inspector shows the raw artefacts.
+    # Two tiers. The mapper reads the corpus VOCABULARY — right where a verb is
+    # the activity (git, a tracker). The classifier reads each RECORD, and runs
+    # only where the vocabulary turned out to be transport rather than meaning
+    # (a mailbox: 761 threads, one verb, one useless "Communicated" step).
     if args.demo:
-        from tests.combined_fixture import demo_activity_mapper
-        mapper = demo_activity_mapper()
+        from tests.combined_fixture import demo_activity_mapper, demo_record_classifier
+        mapper, classifier = demo_activity_mapper(), demo_record_classifier()
     elif args.semantic in ("llm", "hybrid"):
-        mapper = AnthropicActivityMapper()
+        mapper, classifier = AnthropicActivityMapper(), AnthropicRecordClassifier()
     else:
-        mapper = None
-    activities = infer_activities(m, mapper)
+        mapper = classifier = None
+    activities = infer_activities(m, mapper, classifier)
 
     out = Path(args.out_dir)
     write_json(m, out / "model.json")

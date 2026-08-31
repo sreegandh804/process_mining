@@ -41,8 +41,8 @@ def test_scripted_mapper_only_returns_pairs_actually_present():
 
 
 def test_infer_activities_builds_the_corpus_vocabulary():
-    """The map is keyed by (artefact-type / verb), covering every distinct pair."""
-    acts = infer_activities(_model(), demo_activity_mapper())
+    """The verb map is keyed by (artefact-type / verb), covering every distinct pair."""
+    acts = infer_activities(_model(), demo_activity_mapper()).by_vocab
     assert acts["issue/opened"] == "Raised"
     assert acts["pr/merged"] == "Shipped"
     assert acts["email/sent"] == "Raised"       # an email report and an issue are one activity

@@ -68,7 +68,11 @@ class TopicPolicy:
     # is exactly the invented structure this engine exists to avoid.
     min_cases: int = 25
     # A group smaller than this is not a kind; its runs stay in the parent.
+    # Both a floor and a share, because the floor alone does not travel: 3 out of
+    # 40 is a topic, 3 out of 509 is a splinter, and a real mailbox produced a
+    # long tail of 3- and 5-run "kinds" that told a reader nothing.
     min_topic_cases: int = 3
+    min_topic_share: float = 0.02
     # Same bar as the fuzzy pass: enough shared word-mass to be about one thing.
     min_score: float = 0.30
     # Boilerplate exclusion, and deliberately loose. This is a *blocking* device
@@ -189,7 +193,8 @@ def refine(case_texts: dict[str, str], n_corpus_cases: int,
     for cid in texts:
         components[graph.find(cid)].append(cid)
 
-    kept = sorted((ids for ids in components.values() if len(ids) >= policy.min_topic_cases),
+    floor = max(policy.min_topic_cases, round(len(texts) * policy.min_topic_share))
+    kept = sorted((ids for ids in components.values() if len(ids) >= floor),
                   key=lambda ids: (-len(ids), ids[0]))[:policy.max_topics]
     # The self-guard: one group (or none) means the vocabulary did not separate
     # this cluster, and the structural answer stands. Never split into one.

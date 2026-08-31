@@ -20,6 +20,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from induction.abstraction import Abstraction
 from induction.emit import disclaimers_for
 from induction.pipeline import InducedModel
 
@@ -120,18 +121,29 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     orphans = [{"id": o.entity_id.split(":")[-1], "reason": o.reason,
                 "src": (o.evidence[0].locator if o.evidence else "")} for o in m.orphans]
 
+    abstraction = Abstraction.of(activities)
+    read_names = {row["activity"] for row in abstraction.vocabulary
+                  if not row.get("unclassified")}
+    for r in runs:
+        # A run carries an unread record when one of its steps is still the
+        # source's own verb — i.e. the classifier declined it. Surfacing that per
+        # run is what makes the abstention count checkable instead of a total.
+        r["unread"] = bool(read_names) and any(
+            n["name"] not in read_names for n in r["activities"])
+
     return {
         "meta": {
             "title": "How the work runs" if items == "runs" else f"How your {items} run",
             "corpus": _corpus_line(m, items),
             "scope": disclaimers_for(m),
             "ai_named": bool(names.get("_ai")),
-            "ai_steps": bool(activities),
+            "ai_steps": bool(abstraction),
             "item": item, "items": items,
         },
         "processes": processes,
         "runs": runs,
         "filters": filters,
+        "vocabulary": abstraction.vocabulary,
         "orphans": orphans,
     }
 
@@ -246,21 +258,23 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
               gaps_by_case, activities=None) -> dict:
     canon = _canon(kind)
     gaps = gaps_by_case.get(case.id, [])
-    activities = activities or {}
+    abstraction = Abstraction.of(activities)
 
     def _activity(ev) -> str:
-        """The activity a verb realises — the AI map when present, else the verb's
-        own label. The map is what turns 'issue opened' + 'email sent' into one
-        'Raised' step; without it we show the artefact's own verb, claiming no
+        """The activity a record realises — the reading of the record itself when
+        there is one, else the verb map, else the verb's own label. The reading is
+        what turns 400 emails that all say 'sent' into Requested / Reviewed /
+        Approved; the map is what turns 'issue opened' + 'email sent' into one
+        'Raised'. With neither we show the artefact's own verb, claiming no
         abstraction we did not earn."""
         artefact = ents[ev.entity_id].type if ev.entity_id in ents else "record"
-        return activities.get(f"{artefact}/{ev.action}") or step_label(ev.action)
+        return abstraction.activity_of(ev.id, artefact, ev.action) or step_label(ev.action)
 
     # action -> activity name where a verb maps to one activity across artefact
     # types, so a MISSING step (which carries only a verb) still reads as the
     # process activity, not the raw verb.
     act2activity: dict = {}
-    for key, name in activities.items():
+    for key, name in abstraction.by_vocab.items():
         a = key.split("/", 1)[-1]
         act2activity[a] = None if (a in act2activity and act2activity[a] != name) else name
 
@@ -289,7 +303,9 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
                 # detail ("review requested"), not the inferred step name
                 "verb": ev.action.replace("_", " "),
                 "when": (ev.timestamp or "").split("T")[0] or "—",
-                "who": who, "inferred": False, "note": "",
+                # A read activity shows the span it was read from: the difference
+                # between a claim you can check and one you have to accept.
+                "who": who, "inferred": False, "note": abstraction.span_of(ev.id) or "",
                 "src": src, "is_url": src.startswith("http"),
                 "src_kind": _SRC_WORD.get(ev.source.split(":")[0], ev.source.split(":")[0]),
             })
@@ -446,6 +462,19 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .wrap{max-width:920px;margin:0 auto;padding:32px 24px 80px}
   h1{font-size:23px;font-weight:700;letter-spacing:-.01em}
   .source{color:var(--ink-2);margin-top:6px;font-size:14px}.source b{color:var(--ink);font-weight:600}
+  table.vocab{width:100%;border-collapse:collapse;margin-top:4px}
+  table.vocab th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--ink-3);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line-2)}
+  table.vocab th.num,table.vocab td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .vrow{cursor:pointer;border-bottom:1px solid var(--line)}
+  .vrow>td{padding:9px 10px;vertical-align:top;font-size:13px}
+  .vrow:hover{background:var(--accent-soft)}
+  .vrow.on{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
+  .vrow.vunread>td:first-child b{color:var(--attn)}
+  .vnote{font-size:12px;color:var(--ink-3);margin-top:2px}
+  .vph{color:var(--ink-2)}
+  .ph{display:inline-block;background:var(--bg);border:1px solid var(--line-2);border-radius:4px;
+    padding:1px 6px;margin:0 4px 4px 0;font-family:var(--mono);font-size:11px}
   .ai{display:inline-block;font-size:11px;color:var(--accent);background:var(--accent-soft);border-radius:5px;padding:1px 7px;margin-left:6px}
   section{margin-top:36px}
   .sec-h{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
@@ -521,6 +550,17 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div id="procs"></div>
   </section>
 
+  <section id="vocabSec" hidden>
+    <div class="sec-h">What each step was read from</div>
+    <div class="sec-lead">The steps above are not in the records — the systems only
+      recorded that a message was sent. Each one was read from the message's own
+      words. This is that reading, in bulk: what it decided, how often, and the
+      phrases it went on. Click any row to see only the runs it touched.</div>
+    <table class="vocab"><thead><tr><th>Step</th><th class="num">Records</th>
+      <th>Read from phrases like</th></tr></thead>
+      <tbody id="vocabRows"></tbody></table>
+  </section>
+
   <section>
     <div class="sec-h" id="tableHead"></div>
     <div class="sec-lead">All of them — not a sample. The buttons are just views of this list; each is exact, and every row opens to its source record.</div>
@@ -557,6 +597,16 @@ document.getElementById('procs').innerHTML = V.processes.map(p=>`
         <span class="lbl">${esc(pa.label)}</span></div>`).join('')}</div>
   </div>`).join('');
 
+if((V.vocabulary||[]).length){
+  document.getElementById('vocabSec').hidden = false;
+  document.getElementById('vocabRows').innerHTML = V.vocabulary.map(v=>`
+    <tr class="vrow ${v.unclassified?'vunread':''}" data-act="${v.unclassified?'__unread__':esc(v.activity)}">
+      <td><b>${esc(v.activity)}</b>${v.unclassified?'<div class="vnote">kept the source\u2019s own verb \u2014 not read into a step</div>':''}</td>
+      <td class="num">${v.n}</td>
+      <td class="vph">${v.phrases.map(pp=>`<span class="ph">${esc(pp)}</span>`).join('') || '\u2014'}</td>
+    </tr>`).join('');
+}
+
 const rowsEl=document.getElementById('rows'), filtersEl=document.getElementById('filters');
 let filter='all', q='';
 filtersEl.innerHTML = V.filters.map(f=>
@@ -565,6 +615,11 @@ filtersEl.innerHTML = V.filters.map(f=>
 function render(){
   const list = V.runs.filter(r=>{
     if(filter.startsWith('kind:')){ if(r.kind_id!==filter.slice(5)) return false; }
+    else if(filter==='act:__unread__'){ if(!r.unread) return false; }
+    else if(filter.startsWith('act:')){
+      const want=filter.slice(4);
+      if(!r.activities.some(n=>n.name===want)) return false;
+    }
     else if(filter!=='all' && r.dev_key!==filter) return false;
     if(q && !((r.id+' '+r.title+' '+r.actor+' '+r.status+' '+r.kind).toLowerCase().includes(q))) return false;
     return true;
@@ -601,8 +656,20 @@ function render(){
 }
 document.getElementById('search').addEventListener('input',e=>{q=e.target.value.toLowerCase();render();});
 filtersEl.querySelectorAll('.fbtn').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.vrow.on').forEach(x=>x.classList.remove('on'));
   filtersEl.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); filter=b.dataset.f; render();});
+
+// Clicking a step in the audit table filters the run list to the runs it touched
+// — the point of the table is that the reading can be checked, not just totalled.
+document.querySelectorAll('.vrow').forEach(tr=>tr.onclick=()=>{
+  const key='act:'+tr.dataset.act, already=tr.classList.contains('on');
+  document.querySelectorAll('.vrow.on').forEach(x=>x.classList.remove('on'));
+  filtersEl.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on'));
+  if(already){ filter='all'; filtersEl.querySelector('.fbtn').classList.add('on'); }
+  else { filter=key; tr.classList.add('on');
+         document.getElementById('tableHead').scrollIntoView({behavior:'smooth',block:'start'}); }
+  render();});
 
 document.getElementById('orphanNote').innerHTML = V.orphans.length
   ? `<b>${V.orphans.length}</b> record${V.orphans.length===1?'':'s'} could not be matched to any ${esc(V.meta.item)} (e.g. <code>${esc(V.orphans[0].src)}</code> — ${esc(V.orphans[0].reason)}) — set aside, not counted.`
