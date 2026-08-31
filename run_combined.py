@@ -80,6 +80,39 @@ def _load_real(gh_path: Path, gh_slug: str | None,
     return shaped, slug
 
 
+def _require_a_key(args) -> None:
+    """Refuse to produce a run labelled `semantic=llm` that had no model in it.
+
+    Every AI path here returns `{}` on a missing key — deliberately, so a missing
+    key can never break a run. Composed, that politeness becomes a lie: the
+    header prints `semantic=llm`, the model tier, the namer and the record
+    reader all silently no-op, and the output is a deterministic run wearing an
+    AI label. That happened on a real 400-message corpus and cost an afternoon.
+    So: asked for the model, say plainly when it cannot be had, and stop.
+    """
+    import os
+    wants_model = args.semantic in ("llm", "hybrid") or args.names == "llm"
+    if args.demo or not wants_model:
+        return
+    problems = []
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        problems.append("ANTHROPIC_API_KEY is not set in this shell")
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:
+        problems.append("the Anthropic SDK is missing (pip install anthropic)")
+    if not problems:
+        return
+    print("[run] you asked for the model tier, and it cannot run:", file=sys.stderr)
+    for p in problems:
+        print(f"         - {p}", file=sys.stderr)
+    print("       Refusing rather than emitting a deterministic run labelled "
+          "'semantic=llm'.\n"
+          "       Fix the above, or re-run with --semantic off for the "
+          "deterministic model.", file=sys.stderr)
+    raise SystemExit(2)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -94,6 +127,8 @@ def main(argv=None) -> int:
     ap.add_argument("--names", choices=["off", "llm"], default="off")
     ap.add_argument("--out-dir", default="out")
     args = ap.parse_args(argv)
+
+    _require_a_key(args)
 
     if args.demo:
         shaped, slug = _load_demo()

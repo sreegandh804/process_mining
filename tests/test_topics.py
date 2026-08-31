@@ -193,3 +193,24 @@ def test_terms_name_a_subject_not_an_identifier():
     flat = [t for group in terms.values() for t in group]
     assert not [t for t in flat if "@" in t], flat
     assert not [t for t in flat if t.isdigit()], flat
+
+
+def test_a_word_that_is_only_part_of_an_address_is_not_a_topic():
+    """A real mailbox produced a kind called "com, vince, kaminski".
+
+    Dropping the identifier is not enough: the tokenizer reads
+    'vince.j.kaminski@enron.com' as the WORDS vince / kaminski / enron / com as
+    well, and those are what surfaced. A word that exists here only as a piece of
+    an identifier names a person or a host, never a kind of work.
+    """
+    who = "vince.j.kaminski@enron.com"
+    texts = {}
+    for i in range(14):
+        texts[f"isda:{i}"] = f"{ISDA} number {i}\n----- Forwarded by {who} on 10/13/2001"
+    for i in range(14):
+        texts[f"gas:{i}"] = f"{GAS} cycle {i}\n----- Forwarded by {who} on 10/13/2001"
+    _, terms = refine(texts, n_corpus_cases=len(texts))
+    assert terms
+    flat = [t for group in terms.values() for t in group]
+    for leaked in ("vince", "kaminski", "enron", "com"):
+        assert leaked not in flat, f"{leaked!r} came from the address, not the subject: {flat}"

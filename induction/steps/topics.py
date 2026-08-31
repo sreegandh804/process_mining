@@ -181,13 +181,18 @@ def refine(case_texts: dict[str, str], n_corpus_cases: int,
         if sim.score < policy.min_score:
             continue
         graph.union(a, b)
-        # Only the content words name the topic. `similar()` also matched
-        # identifiers — an address, a ticket number, a domain — and those are
-        # real evidence for the *join* but say nothing about the *subject*: two
-        # threads sharing 'vince.j.kaminski@enron.com' share a person, not a
-        # kind of work, and a kind called "713, com, v…@enron.com" tells a
-        # reader nothing. Keep them in the score, keep them out of the name.
-        joined_terms[(a, b)] = sim.shared_content
+        # Only the content words name the topic, and not even all of those.
+        # `similar()` also matched identifiers — an address, a ticket number —
+        # which are real evidence for the *join* and say nothing about the
+        # *subject*: two threads sharing 'vince.j.kaminski@enron.com' share a
+        # person, not a kind of work. Dropping the identifiers is not enough on
+        # its own, because the tokenizer ALSO reads that address as the words
+        # 'vince', 'kaminski', 'enron', 'com' — which is how a kind ended up
+        # called "com, vince, kaminski". So drop any word that exists here only
+        # as a piece of an identifier.
+        inside = "\n".join(sim.shared_strong).lower()
+        joined_terms[(a, b)] = tuple(t for t in sim.shared_content
+                                     if t.lower() not in inside)
 
     components: dict[str, list[str]] = defaultdict(list)
     for cid in texts:
