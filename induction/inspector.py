@@ -122,6 +122,7 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
                 "src": (o.evidence[0].locator if o.evidence else "")} for o in m.orphans]
 
     abstraction = Abstraction.of(activities)
+    vocabulary = _naming_provenance(m, abstraction)
     read_names = {row["activity"] for row in abstraction.vocabulary
                   if not row.get("unclassified")}
     for r in runs:
@@ -143,9 +144,67 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
         "processes": processes,
         "runs": runs,
         "filters": filters,
-        "vocabulary": abstraction.vocabulary,
+        "vocabulary": vocabulary,
         "orphans": orphans,
     }
+
+
+def _naming_provenance(m, abstraction) -> list[dict]:
+    """Where every step's name came from — not only the ones a model read.
+
+    The first version listed the record-reading tier and nothing else, so a run
+    whose steps were all named by the VERB MAP showed no legend at all: the page
+    said "Correspondence Sent" with no hint a model had invented the phrase.
+
+    The second version read `m.steps`, and was wrong in the same way for the
+    opposite reason — that catalogue is only re-derived when the reading tier
+    fires, so a verb-map-only run had cards saying "Correspondence Sent" above a
+    legend saying `sent`, "the source's own word". A legend that disagrees with
+    the thing it explains is worse than none.
+
+    So this derives from the DISPLAYED activity, exactly as `_activity()` does,
+    and attributes each name to the tier that actually produced it.
+    """
+    types = {e.id: e.type for e in m.shaped.entities}
+    groups: dict[str, dict] = {}
+    for ev in m.shaped.events:
+        artefact = types.get(ev.entity_id, "record")
+        reading = abstraction.by_record.get(ev.id)
+        mapped = abstraction.by_vocab.get(f"{artefact}/{ev.action}")
+        if reading:
+            name, tier, how = reading["activity"], "model", "read"
+        elif mapped:
+            name, tier, how = mapped, "model", "mapped"
+        else:
+            name, tier, how = ev.action, "direct", "source"
+        row = groups.setdefault(name, {"activity": name, "n": 0, "tier": tier,
+                                       "how_kind": how, "n_read": 0,
+                                       "verbs": set(), "phrases": []})
+        row["n"] += 1
+        row["verbs"].add(ev.action)
+        if reading:
+            row["n_read"] += 1
+            row["tier"], row["how_kind"] = "model", "read"
+            if reading["span"] not in row["phrases"] and len(row["phrases"]) < 6:
+                row["phrases"].append(reading["span"])
+
+    rows = []
+    for row in groups.values():
+        verbs = ", ".join(sorted(row.pop("verbs")))
+        kind = row.pop("how_kind")
+        if kind == "read":
+            row["how"] = f"read from {row['n_read']} of {row['n']} records' own words"
+        elif kind == "mapped":
+            row["how"] = f"grouped and named by the model from the verb {verbs!r}"
+        else:
+            row["how"] = "the source's own word for it"
+        rows.append(row)
+    rows.sort(key=lambda r: -r["n"])
+    if abstraction.n_unclassified:
+        rows.append({"activity": "Unclassified", "n": abstraction.n_unclassified,
+                     "tier": "", "phrases": [], "unclassified": True, "n_read": 0,
+                     "how": "the model would not commit — kept the source's own verb"})
+    return rows
 
 
 def _canon(kind) -> list[str]:
@@ -473,6 +532,9 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .vrow.vunread>td:first-child b{color:var(--attn)}
   .vnote{font-size:12px;color:var(--ink-3);margin-top:2px}
   .vph{color:var(--ink-2)}
+  .tier-tag{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3);
+    border:1px solid var(--line-2);border-radius:4px;padding:0 5px;margin-left:4px}
+  .phs{margin-top:5px}
   .ph{display:inline-block;background:var(--bg);border:1px solid var(--line-2);border-radius:4px;
     padding:1px 6px;margin:0 4px 4px 0;font-family:var(--mono);font-size:11px}
   .ai{display:inline-block;font-size:11px;color:var(--accent);background:var(--accent-soft);border-radius:5px;padding:1px 7px;margin-left:6px}
@@ -551,13 +613,13 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   </section>
 
   <section id="vocabSec" hidden>
-    <div class="sec-h">What each step was read from</div>
-    <div class="sec-lead">The steps above are not in the records — the systems only
-      recorded that a message was sent. Each one was read from the message's own
-      words. This is that reading, in bulk: what it decided, how often, and the
-      phrases it went on. Click any row to see only the runs it touched.</div>
+    <div class="sec-h">Where each step's name came from</div>
+    <div class="sec-lead">A step's name is a claim like any other. Some are the
+      source's own word; some were grouped and named by a model; some were read out
+      of the record's own text, and those show the words they were read from. Click
+      any row to see only the runs it touched.</div>
     <table class="vocab"><thead><tr><th>Step</th><th class="num">Records</th>
-      <th>Read from phrases like</th></tr></thead>
+      <th>How it got that name</th></tr></thead>
       <tbody id="vocabRows"></tbody></table>
   </section>
 
@@ -603,7 +665,8 @@ if((V.vocabulary||[]).length){
     <tr class="vrow ${v.unclassified?'vunread':''}" data-act="${v.unclassified?'__unread__':esc(v.activity)}">
       <td><b>${esc(v.activity)}</b>${v.unclassified?'<div class="vnote">kept the source\u2019s own verb \u2014 not read into a step</div>':''}</td>
       <td class="num">${v.n}</td>
-      <td class="vph">${v.phrases.map(pp=>`<span class="ph">${esc(pp)}</span>`).join('') || '\u2014'}</td>
+      <td class="vph">${esc(v.how)}${v.tier?` <span class="tier-tag">${esc(v.tier)}</span>`:''}
+        ${v.phrases.length?`<div class="phs">${v.phrases.map(pp=>`<span class="ph">${esc(pp)}</span>`).join('')}</div>`:''}</td>
     </tr>`).join('');
 }
 
