@@ -79,6 +79,12 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
         kind = kind_of_case.get(case.id)
         rv = _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
                        gaps_by_case, activities)
+        # which induced process this run is an instance of — the link between the
+        # "processes we found" section and the flat list, and how a multi-product
+        # corpus is navigated (one kind per distinct process/offering).
+        rv["kind"] = kind_label(kind) if kind else "Ungrouped"
+        rv["kind_id"] = kind.id if kind else "none"
+        rv["kind_attn"] = bool(kind and kind.rejected)
         runs.append(rv)
         dev_counter[rv["dev_key"]] += 1
         dev_meta[rv["dev_key"]] = (rv["dev_label"], rv["dev_attn"])
@@ -92,6 +98,15 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
                    "ended": "Ended early", "unmatched": "Unmatched record",
                    "incomplete": "Incomplete", "automated": "Automated"}
     filters = [{"key": "all", "label": f"All {items}", "count": len(runs), "attn": False}]
+    # By process kind — the primary way to navigate a multi-process / multi-product
+    # corpus (only shown when there is more than one kind to choose between).
+    kind_count = Counter(r["kind_id"] for r in runs)
+    kmeta = {r["kind_id"]: (r["kind"], r["kind_attn"]) for r in runs}
+    if len(kind_count) > 1:
+        for kid, n in kind_count.most_common():
+            label, attn = kmeta[kid]
+            filters.append({"key": f"kind:{kid}", "label": label, "count": n, "attn": attn})
+    # then by how a run deviates from its kind's common path
     for key, n in dev_counter.most_common():
         _, attn = dev_meta[key]
         filters.append({"key": key, "label": group_label.get(key, key), "count": n, "attn": attn})
@@ -439,6 +454,7 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   td{padding:11px 14px;font-size:13.5px;vertical-align:top}
   td.id{font-family:var(--mono);font-size:12.5px}td.path-c{color:var(--ink-2);font-size:12.5px}
   .dev{font-size:12.5px;color:var(--ink-3)}.dev.attn{color:var(--attn);font-weight:600}
+  .kind{font-size:12.5px;color:var(--ink-2)}.kind.flag{color:var(--flag)}
   .rtitle{font-weight:600;color:var(--ink);font-size:13.5px}
   .rsub{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin-top:2px}
   .tchip{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-left:6px;vertical-align:middle}
@@ -480,7 +496,7 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <div class="sec-lead">All of them — not a sample. The buttons are just views of this list; each is exact, and every row opens to its source record.</div>
     <div class="filters" id="filters"></div>
     <div class="searchrow"><input id="search" placeholder="Find one by id, owner, or status…"></div>
-    <table><thead><tr><th id="thId">Item</th><th>Owner</th><th>Path taken</th><th>Differs how</th></tr></thead>
+    <table><thead><tr><th id="thId">Item</th><th>Process</th><th>Owner</th><th>Path taken</th><th>Differs how</th></tr></thead>
       <tbody id="rows"></tbody></table>
     <div class="aside" id="orphanNote"></div>
   </section>
@@ -518,8 +534,9 @@ filtersEl.innerHTML = V.filters.map(f=>
 
 function render(){
   const list = V.runs.filter(r=>{
-    if(filter!=='all' && r.dev_key!==filter) return false;
-    if(q && !((r.id+' '+r.title+' '+r.actor+' '+r.status).toLowerCase().includes(q))) return false;
+    if(filter.startsWith('kind:')){ if(r.kind_id!==filter.slice(5)) return false; }
+    else if(filter!=='all' && r.dev_key!==filter) return false;
+    if(q && !((r.id+' '+r.title+' '+r.actor+' '+r.status+' '+r.kind).toLowerCase().includes(q))) return false;
     return true;
   });
   const art = a=>`<div class="ev ${a.inferred?'inf':''}">
@@ -537,13 +554,14 @@ function render(){
     const chip = r.chip_word?` <span class="tchip ${esc(r.chip_class)}">${esc(r.chip_word)}</span>`:'';
     const xchip = r.cross?` <span class="xchip">${r.sources.map(esc).join(' + ')}</span>`:'';
     return `<tr class="run" data-i="${i}"><td><div class="rtitle">${esc(r.title)}</div>
-          <div class="rsub">${esc(r.id)}${chip}${xchip}</div></td><td>${esc(r.actor)}</td>
+          <div class="rsub">${esc(r.id)}${chip}${xchip}</div></td>
+        <td><span class="kind ${r.kind_attn?'flag':''}">${esc(r.kind)}</span></td><td>${esc(r.actor)}</td>
         <td class="path-c">${esc(r.path)}</td>
         <td><span class="dev ${r.dev_attn?'attn':''}">${esc(r.dev_label)}</span></td></tr>
-      <tr class="detail" id="d${i}" hidden><td colspan="4">
+      <tr class="detail" id="d${i}" hidden><td colspan="5">
         <div class="tl"><div class="tlh">${esc(r.id)} · ${esc(r.status)} — the process, and the artefacts that evidence each step</div>
           ${r.why?`<div class="why"><b>Why these are one ${esc(V.meta.item)}:</b> ${esc(r.why)}</div>`:''}${acts}${inf}</div></td></tr>`;
-  }).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--ink-3);padding:22px">None match.</td></tr>`;
+  }).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--ink-3);padding:22px">None match.</td></tr>`;
   rowsEl.querySelectorAll('tr.run').forEach(tr=>tr.onclick=()=>{
     const d=document.getElementById('d'+tr.dataset.i); d.hidden=!d.hidden;});
 }
