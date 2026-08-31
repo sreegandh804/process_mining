@@ -77,8 +77,15 @@ class AnthropicActivityMapper(ActivityMapper):
         "artefact types and systems (an issue 'opened' and an email 'sent' reporting "
         "a bug are both 'Raised'; a pull request 'merged' and an issue 'closed' are "
         "'Shipped') — and give each group a short human activity name. You may NAME "
-        "and GROUP only: do not invent an activity no pair evidences. Return ONLY "
-        'JSON: {"map": {"<artefact>/<verb>": "<Activity Name>"}} covering every pair.'
+        "and GROUP only: do not invent an activity no pair evidences.\n"
+        "NEVER return a name that just restates how the record travelled — "
+        "'Correspondence Sent', 'Email Forwarded', 'Message Posted' are the verb in "
+        "more words and say nothing about the work. If a verb genuinely carries no "
+        "activity (a mailbox records only that something was sent), map it to the "
+        "single plainest word you can and STOP; a later pass reads the record "
+        "itself. Padding the verb hides from that pass that it is needed.\n"
+        'Return ONLY JSON: {"map": {"<artefact>/<verb>": "<Activity Name>"}} '
+        "covering every pair."
     )
 
     def __init__(self, api_model: Optional[str] = None):
@@ -237,11 +244,15 @@ def _parse_map(text: str) -> dict:
             text = text[4:]
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end == -1:
+        start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
         return {}
     try:
         obj = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
         return {}
+    if isinstance(obj, list):
+        return obj                       # a bare array is a valid answer for discovery
     inner = obj.get("map", obj)
     return inner if isinstance(inner, dict) else {}
 
@@ -331,9 +342,17 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier) -> None
         print(f"[abstraction] activity discovery skipped ({type(e).__name__}: {e})")
         return
     if len(vocabulary) < 2:
-        # One activity is what the verb map already told us. Claiming it a second
-        # time, more expensively, is not an improvement.
+        # One activity is what the verb map already told us; claiming it again,
+        # more expensively, is not an improvement. But say so — a silent return
+        # here is indistinguishable from the tier never having been asked, and on
+        # a real run that cost an evening of wondering which had happened.
+        print(f"[abstraction] {len(records)} records needed reading, but activity "
+              f"discovery returned {len(vocabulary)} activities "
+              f"({vocabulary or 'none'}) — nothing to classify into, so the steps "
+              f"stay as the source's own verbs")
         return
+    print(f"[abstraction] reading {len(records)} records into "
+          f"{len(vocabulary)} activities: {', '.join(vocabulary)}")
 
     got: dict[str, dict] = {}
     for i in range(0, len(records), _CLASSIFY_BATCH):
@@ -468,9 +487,17 @@ class AnthropicRecordClassifier(RecordClassifier):
     def discover(self, samples: list[str]) -> list[str]:
         got = self._call(self._DISCOVER_SYSTEM,
                          "Records:\n" + json.dumps([s[:400] for s in samples], indent=1),
-                         max_tokens=600)
-        acts = got.get("activities", got if isinstance(got, list) else [])
-        return [str(a) for a in acts if isinstance(a, str)] if isinstance(acts, list) else []
+                         max_tokens=1500)
+        if isinstance(got, list):                       # a bare JSON array
+            acts = got
+        elif isinstance(got, dict):
+            # the documented key, else the only list-valued key it returned
+            acts = got.get("activities")
+            if not isinstance(acts, list):
+                acts = next((v for v in got.values() if isinstance(v, list)), [])
+        else:
+            acts = []
+        return [str(a) for a in acts if isinstance(a, str) and a.strip()]
 
     def classify(self, records: list[dict], vocabulary: list[str]) -> dict[str, dict]:
         return self._call(
