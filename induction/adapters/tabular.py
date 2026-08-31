@@ -525,7 +525,11 @@ def _detect_long(rows, cols, values, distinct, ts_col, source, entity_type):
     n = len(rows)
     case_cands = [c for c in cols if c != ts_col and 2 <= distinct[c] <= n * 0.95
                   and 1.5 <= n / max(1, distinct[c]) <= _MAX_EVENTS_PER_CASE]
-    act_cands = [c for c in cols if c != ts_col and 2 <= distinct[c] <= _MAX_ACTIVITIES]
+    # An activity is a LABEL. A counter (StepId, row number, NextStepId) never
+    # repeats inside a case, so it scores a perfect density and wins every time —
+    # it was the first thing this picked on a real task-mining recording.
+    act_cands = [c for c in cols if c != ts_col and 2 <= distinct[c] <= _MAX_ACTIVITIES
+                 and not _looks_numeric(values[c])]
     best = None
     for case_c in case_cands:
         groups: dict[str, list[int]] = {}
@@ -619,6 +623,20 @@ def _detect_wide(rows, cols, values, distinct, source, entity_type):
         f"{n} rows, and {len(date_cols)} columns parse as dates "
         f"({', '.join(date_cols[:4])}{'...' if len(date_cols) > 4 else ''}), so a "
         f"row is one case and each date column is one step"))
+
+
+def _looks_numeric(vals: list[str]) -> bool:
+    filled = [v for v in vals if v]
+    if not filled:
+        return False
+    n = 0
+    for v in filled:
+        try:
+            float(v)
+            n += 1
+        except ValueError:
+            pass
+    return n / len(filled) >= 0.9
 
 
 def _action_from(column: str) -> str:

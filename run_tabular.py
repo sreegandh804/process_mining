@@ -66,17 +66,38 @@ def _run_detected(args) -> int:
     anything is induced from it: a reader who disagrees can see the measurement,
     not just the verdict.
     """
-    from induction.adapters.tabular import detect
+    from induction.adapters.tabular import Detection, detect, read_rows
+    from induction.model import direct
     path = Path(args.file)
     if not path.exists():
         print(f"[run] no such file: {path}", file=sys.stderr)
         return 2
-    found = detect(path, entity_type=args.entity)
+    if args.case_column and args.activity_column and args.timestamp_column:
+        # Some files hold more than one valid reading — a UI recording is both a
+        # log of clicks and a log of the business steps those clicks realise, and
+        # only a person knows which one is wanted. Detection is for a file with
+        # one obvious reading; this is for the rest.
+        from induction.adapters.tabular import EventLogSpec
+        cols = [c for c in (read_rows(path)[:1] or [{}])[0]]
+        spec = EventLogSpec(
+            source=f"log:{path.stem}", entity_type=args.entity,
+            case_id_column=args.case_column, activity_column=args.activity_column,
+            timestamp_column=args.timestamp_column, actor_column=args.actor_column,
+            attr_columns=[c for c in cols if c not in (
+                args.case_column, args.activity_column, args.timestamp_column,
+                args.actor_column)])
+        print(f"[run] reading as an event log you declared: case={args.case_column!r} "
+              f"activity={args.activity_column!r} timestamp={args.timestamp_column!r}")
+        found = Detection("long", spec, rationale="columns declared, not detected",
+                          confidence=direct())
+    else:
+        found = detect(path, entity_type=args.entity)
     if not found.mode:
         print(f"[run] could not read {path.name} as a process table.\n"
               f"      {found.rationale}", file=sys.stderr)
         return 2
-    print(f"[run] {found.rationale}  [{found.confidence.tier.label}]")
+    if found.rationale != "columns declared, not detected":
+        print(f"[run] {found.rationale}  [{found.confidence.tier.label}]")
 
     m = run_tabular_pipeline([(found.spec, path)], slug=path.stem,
                              profile=GENERIC_PROFILE, max_cases=args.max_cases)
@@ -98,6 +119,10 @@ def main(argv=None) -> int:
                                    "(an event log or a tracker export) instead of a built-in spec")
     ap.add_argument("--entity", default="case", help="what one run is called with --file")
     ap.add_argument("--max-cases", type=int, help="slice cap for a large event log")
+    ap.add_argument("--case-column", help="name the case column instead of detecting it")
+    ap.add_argument("--activity-column", help="name the activity column")
+    ap.add_argument("--timestamp-column", help="name the timestamp column")
+    ap.add_argument("--actor-column", help="name the actor column")
     ap.add_argument("--xlsx", action="store_true", help="read .xlsx instead of .csv (needs openpyxl)")
     ap.add_argument("--out-dir", default="out")
     ap.add_argument("--profile", choices=["generic", "accounting"], default="generic")
