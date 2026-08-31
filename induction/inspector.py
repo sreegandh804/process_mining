@@ -172,6 +172,44 @@ def _path_label(sig, canon, step_label) -> str:
     return "different order"
 
 
+# How sure we are a run holds together, in words a non-technical reader can act
+# on. Only the two *inferred* tiers get a chip — a deterministic run is the norm
+# and needs no badge; the point is to make a guess look like a guess.
+_TIER_CHIP = {
+    "heuristic": ("matched on wording", "t-soft"),
+    "model": ("AI judged same work", "t-ai"),
+}
+_SRC_WORD = {"github": "GitHub", "mail": "email", "git": "git history",
+             "changelog": "changelog", "tabular": "spreadsheet", "finance": "spreadsheet"}
+
+
+def _run_sources(case, ents) -> list[str]:
+    """The distinct systems a run spans — the honest headline of a cross-source
+    case ('this one activity lived in email AND GitHub')."""
+    words: list[str] = []
+    for eid in case.entity_ids:
+        e = ents.get(eid)
+        if not e:
+            continue
+        w = _SRC_WORD.get(e.source.split(":")[0], e.source.split(":")[0])
+        if w not in words:
+            words.append(w)
+    return words
+
+
+def _run_title(case, ents, disp: str) -> str:
+    """A human name for the run — the anchor's title/subject, so an ops lead sees
+    'SSO login fails after token refresh', not 'case:pr:15'."""
+    anchor_id = case.id[5:] if case.id.startswith("case:") else case.id
+    for eid in [anchor_id, *case.entity_ids]:
+        e = ents.get(eid)
+        if e:
+            t = e.attrs.get("title") or e.attrs.get("subject")
+            if t:
+                return t.strip()
+    return disp
+
+
 def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, gaps_by_case) -> dict:
     canon = _canon(kind)
     pos = {a: i for i, a in enumerate(canon)}
@@ -232,12 +270,23 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label, g
     if not status:
         status = (timeline[-1]["name"] if timeline else "—")
 
+    tier = case.confidence.tier.label
+    chip_word, chip_class = _TIER_CHIP.get(tier, ("", ""))
+    sources = _run_sources(case, ents)
+
     return {
         "id": disp,
+        "title": _run_title(case, ents, disp),
         "actor": (actors.most_common(1)[0][0] if actors else "—"),
         "status": status,
         "path": " → ".join(s["name"] for s in timeline if not s["inferred"]) or "—",
         "dev_key": dev_key, "dev_label": dev_label, "dev_attn": dev_attn,
+        # Honesty on the face of the row: an inferred join wears a chip and, when
+        # it is the model tier, the model's own reason; a deterministic run wears
+        # nothing. Cross-source runs say which systems they crossed.
+        "tier": tier, "chip_word": chip_word, "chip_class": chip_class,
+        "why": (case.confidence.rationale or "") if tier in ("heuristic", "model") else "",
+        "sources": sources, "cross": len(sources) > 1,
         "timeline": timeline,
     }
 
@@ -332,6 +381,13 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   td{padding:11px 14px;font-size:13.5px;vertical-align:top}
   td.id{font-family:var(--mono);font-size:12.5px}td.path-c{color:var(--ink-2);font-size:12.5px}
   .dev{font-size:12.5px;color:var(--ink-3)}.dev.attn{color:var(--attn);font-weight:600}
+  .rtitle{font-weight:600;color:var(--ink);font-size:13.5px}
+  .rsub{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin-top:2px}
+  .tchip{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-left:6px;vertical-align:middle}
+  .tchip.t-soft{color:var(--flag);background:var(--attn-soft)}
+  .tchip.t-ai{color:var(--accent);background:var(--accent-soft);border:1px dashed #b8ccf5}
+  .xchip{display:inline-block;font-size:10px;font-weight:600;color:var(--ink-2);background:#eef1f5;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle}
+  .why{font-size:12.5px;color:var(--accent);background:var(--accent-soft);border-radius:8px;padding:8px 12px;margin:2px 20px 10px}.why b{color:var(--ink)}
   .detail td{padding:0;background:#fbfcfd}
   .tl{padding:14px 20px 16px}.tl .tlh{font-size:11.5px;color:var(--ink-3);margin-bottom:10px;font-family:var(--mono)}
   .ev{display:grid;grid-template-columns:190px 1fr auto;gap:12px;align-items:baseline;padding:6px 0 6px 16px;border-left:2px solid var(--line);margin-left:4px;position:relative}
@@ -399,7 +455,7 @@ filtersEl.innerHTML = V.filters.map(f=>
 function render(){
   const list = V.runs.filter(r=>{
     if(filter!=='all' && r.dev_key!==filter) return false;
-    if(q && !((r.id+' '+r.actor+' '+r.status).toLowerCase().includes(q))) return false;
+    if(q && !((r.id+' '+r.title+' '+r.actor+' '+r.status).toLowerCase().includes(q))) return false;
     return true;
   });
   rowsEl.innerHTML = list.map((r,i)=>{
@@ -407,11 +463,15 @@ function render(){
         <span class="en">${esc(s.name)}${s.inferred?'<span class="inftag">inferred</span>':''}</span>
         <span class="ed">${esc(s.when)}${s.who?' · '+esc(s.who):(s.inferred?'':' · owner not recorded')}${s.note?' — '+esc(s.note):''}</span>
         <span class="src">${esc(s.src)}</span></div>`).join('');
-    return `<tr class="run" data-i="${i}"><td class="id">${esc(r.id)}</td><td>${esc(r.actor)}</td>
+    const chip = r.chip_word?` <span class="tchip ${esc(r.chip_class)}">${esc(r.chip_word)}</span>`:'';
+    const xchip = r.cross?` <span class="xchip">${r.sources.map(esc).join(' + ')}</span>`:'';
+    return `<tr class="run" data-i="${i}"><td><div class="rtitle">${esc(r.title)}</div>
+          <div class="rsub">${esc(r.id)}${chip}${xchip}</div></td><td>${esc(r.actor)}</td>
         <td class="path-c">${esc(r.path)}</td>
         <td><span class="dev ${r.dev_attn?'attn':''}">${esc(r.dev_label)}</span></td></tr>
       <tr class="detail" id="d${i}" hidden><td colspan="4">
-        <div class="tl"><div class="tlh">${esc(r.id)} · ${esc(r.status)} — each step resolves to its source record</div>${tl}</div></td></tr>`;
+        <div class="tl"><div class="tlh">${esc(r.id)} · ${esc(r.status)} — each step resolves to its source record</div>
+          ${r.why?`<div class="why"><b>Why these are one ${esc(V.meta.item)}:</b> ${esc(r.why)}</div>`:''}${tl}</div></td></tr>`;
   }).join('') || `<tr><td colspan="4" style="text-align:center;color:var(--ink-3);padding:22px">None match.</td></tr>`;
   rowsEl.querySelectorAll('tr.run').forEach(tr=>tr.onclick=()=>{
     const d=document.getElementById('d'+tr.dataset.i); d.hidden=!d.hidden;});

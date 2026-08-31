@@ -44,8 +44,9 @@ from typing import Optional
 
 from induction.adapters import Shaped
 from induction.links import Link, links_of, record_unresolved
-from induction.model import Confidence, Entity, Evidence, Event, heuristic
+from induction.model import Confidence, Entity, Evidence, Event, heuristic, model
 from induction.process import Case
+from induction.semantic import SemanticProvider
 from induction.text import Similarity, TokenStats, similar
 
 
@@ -99,6 +100,9 @@ class CorrelationPolicy:
     # a run). Adapters mark them; the correlator just honours the list.
     skip_types: frozenset[str] = frozenset({"person", "orphan_row"})
     fuzzy: FuzzyPolicy = FuzzyPolicy()
+    # Optional model-tier pass (embeddings + LLM). None => off, and the engine
+    # stays fully deterministic and offline. See induction/semantic.py.
+    semantic: Optional[SemanticProvider] = None
 
 
 # Pooled component text is capped so one enormous thread cannot dominate the
@@ -219,17 +223,22 @@ def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correl
             if not round_links:
                 break
             for a, b, conf in round_links:
-                for side in (a, b):
-                    prior = bridge.get(side)
-                    bridge[side] = conf if prior is None or conf.tier < prior.tier else prior
-                graph.union(a, b)
-                # A fuzzy pair is a run nobody declared, so it must license its
-                # own case — but at the weakest anchor rank there is, so any real
-                # claim in the component names it instead.
-                claim = Link(target=a, method="fuzzy-match", tier=conf.tier,
-                             rationale=conf.rationale or "", anchors=True, anchor_rank=9)
-                anchor_claims.setdefault(a, claim)
-                anchor_claims.setdefault(b, replace(claim, target=b))
+                _apply_inferred(a, b, conf, "fuzzy-match", bridge, graph, anchor_claims)
+
+    # ---- pass 4: model — same-work paraphrase the token pass cannot see -----
+    # Opt-in, and strictly a pass over the leftovers: it sees only components that
+    # no key and no shared-token overlap could join, and each join it makes is
+    # `model` — the weakest tier — carrying the model's own reason. It rides the
+    # same bridge machinery as the fuzzy pass, so a case assembled across a model
+    # link reports `model`, never launders the guess into something stronger.
+    if policy.semantic is not None:
+        for _ in range(max(1, policy.fuzzy.max_rounds)):
+            round_links = _semantic_pass(policy.semantic, policy.fuzzy, entities,
+                                         events_by_entity, obs_by_entity, graph)
+            if not round_links:
+                break
+            for a, b, conf in round_links:
+                _apply_inferred(a, b, conf, "model-match", bridge, graph, anchor_claims)
 
     # ---- assemble ---------------------------------------------------------
     shaped.entities.extend(materialised.values())
@@ -363,6 +372,96 @@ def _fuzzy_pass(policy: FuzzyPolicy, entities, events_by_entity, obs_by_entity,
         out.append((ra, rb, heuristic(
             f"no shared key; text overlap {score:.2f} on {sim.describe()}, and {why}"
         )))
+    return out
+
+
+def _apply_inferred(a: str, b: str, conf: Confidence, method: str,
+                    bridge: dict, graph: "_Components", anchor_claims: dict) -> None:
+    """Union two components across an *inferred* bridge (fuzzy or model) and record
+    it, so every record that reached its case across the bridge is scored no higher
+    than the guess was — ``Confidence.weakest`` applied to the chain.
+
+    The joined pair is a run nobody declared, so it licenses its own case — but at
+    the weakest anchor rank there is, so any real claim in the merged component
+    names it instead of the bridge.
+    """
+    for side in (a, b):
+        prior = bridge.get(side)
+        bridge[side] = conf if prior is None or conf.tier < prior.tier else prior
+    graph.union(a, b)
+    claim = Link(target=a, method=method, tier=conf.tier,
+                 rationale=conf.rationale or "", anchors=True, anchor_rank=9)
+    anchor_claims.setdefault(a, claim)
+    anchor_claims.setdefault(b, replace(claim, target=b))
+
+
+def _semantic_pass(provider: SemanticProvider, policy: FuzzyPolicy, entities,
+                   events_by_entity, obs_by_entity, graph,
+                   cap: int = 200) -> list[tuple[str, str, Confidence]]:
+    """One round of model-tier joins over the *current* components.
+
+    Mirrors the fuzzy pass's guards exactly — pooled component text, the proximity
+    requirement, and the same-shape veto — because the point of the model tier is a
+    better *judge*, not a laxer one: the model is only ever asked about pairs that
+    are already close in people-or-time and are not two runs of a single kind. The
+    only thing that changes is which oracle decides a shortlisted pair — a language
+    model that can read paraphrase, in place of token overlap that cannot.
+
+    Greedy, one partner per component per round (the correlator re-runs it), so a
+    chain of model guesses cannot fuse a mega-case in a single sweep.
+    """
+    pooled: dict[str, list[str]] = defaultdict(list)
+    for eid, ent in entities.items():
+        if not (events_by_entity.get(eid) or obs_by_entity.get(eid)):
+            continue
+        text = _text_of(ent, policy.text_attrs)
+        if text:
+            pooled[graph.find(eid)].append(text)
+    if len(pooled) < 2:
+        return []
+
+    texts = {root: " ".join(parts)[:_MAX_POOLED_TEXT] for root, parts in pooled.items()}
+    members: dict[str, list[str]] = defaultdict(list)
+    for eid in entities:
+        members[graph.find(eid)].append(eid)
+
+    roots = list(texts)
+    candidates: list[tuple[str, str]] = []
+    for i, ra in enumerate(roots):
+        for rb in roots[i + 1:]:
+            if policy.require_proximity and _proximity(
+                    members[ra], members[rb], events_by_entity, obs_by_entity, policy) is None:
+                continue
+            if _same_shape(members[ra], members[rb], events_by_entity, policy.max_activity_overlap):
+                continue
+            candidates.append((ra, rb))
+    if not candidates:
+        return []
+
+    # Shortlist so the judge runs on a handful. An embedder ranks best; with none,
+    # judge them all when few, else token-rank down to the cap — a budget when there
+    # is no embedder, never the paraphrase filter the judge exists to beat.
+    shortlist = provider.shortlist(texts, candidates)
+    if shortlist is None:
+        shortlist = candidates
+        if len(shortlist) > cap:
+            stats = TokenStats()
+            for text in texts.values():
+                stats.add(text)
+            shortlist = sorted(
+                shortlist, key=lambda p: -similar(texts[p[0]], texts[p[1]], stats).score)[:cap]
+
+    taken: set[str] = set()
+    out: list[tuple[str, str, Confidence]] = []
+    for ra, rb in shortlist:
+        if ra in taken or rb in taken:
+            continue
+        reason = provider.judge.judge(texts[ra], texts[rb])
+        if not reason:
+            continue
+        taken.add(ra)
+        taken.add(rb)
+        out.append((ra, rb, model(f"same work (model): {reason}")))
     return out
 
 
