@@ -70,8 +70,6 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     item = names.get("item") or item
     items = names.get("items") or items
 
-    processes = [_process_view(k, m, kind_label, step_label) for k in m.kinds]
-
     runs = []
     dev_counter = Counter()
     dev_meta = {}
@@ -91,6 +89,14 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     # order: usual first, then attention items, then the rest — but the table
     # itself is sortable/filterable, so just keep a stable, readable order.
     runs.sort(key=lambda r: (0 if r["dev_key"] == "usual" else 1, r["id"]))
+
+    # The kind cards' flow and variants are built from the runs' ACTIVITY spines —
+    # the same abstraction the detail shows — so "the processes we found" reads as
+    # activities (Raised → Fixed → Shipped), not the raw artefact verbs.
+    runs_by_kind = defaultdict(list)
+    for rv in runs:
+        runs_by_kind[rv["kind_id"]].append(rv)
+    processes = [_process_view(k, m, kind_label, runs_by_kind.get(k.id, [])) for k in m.kinds]
 
     # Filter buttons carry a GENERIC label per group (rows keep their specific
     # one), so "Ended early" doesn't masquerade as one particular end point.
@@ -141,16 +147,11 @@ def _canon(kind) -> list[str]:
     return out
 
 
-def _process_view(k, m, kind_label, step_label) -> dict:
-    canon = _canon(k)
-    actors = Counter()
-    for cid in k.case_ids:
-        case = m.cases.get(cid)
-        if not case:
-            continue
-    # members from the kind's events
+def _process_view(k, m, kind_label, kind_runs) -> dict:
+    # actors from the kind's events (richer than one-per-run)
     ev_by_id = {e.id: e for e in m.shaped.events}
     pname = {e.id: e.attrs.get("name", e.id) for e in m.shaped.entities if e.type == "person"}
+    actors = Counter()
     for cid in k.case_ids:
         case = m.cases.get(cid)
         for eid in (case.event_ids if case else []):
@@ -158,23 +159,28 @@ def _process_view(k, m, kind_label, step_label) -> dict:
             if ev and ev.actor:
                 actors[pname.get(ev.actor, ev.actor)] += 1
 
-    max_freq = max((v.frequency for v in k.variants), default=1)
-    paths = []
-    for v in k.variants:
-        seq = [step_label(a) for a in v.signature]
-        paths.append({
-            "count": v.frequency,
-            "seq": seq,
-            "label": _path_label(v.signature, canon, step_label),
-            "rare": v.role == "one-off" or v.frequency == 1,
-            "width": max(6, round(v.frequency / max_freq * 180)),
-        })
+    # Flow and variants at the ACTIVITY level, taken from the runs' own inferred
+    # spines — so the card shows the process (Raised → Fixed → Shipped), not the
+    # raw artefact verbs the systems happened to record. A variant is a distinct
+    # activity path; its frequency is how many runs took it.
+    ident = lambda x: x
+    sigs = Counter(tuple(n["name"] for n in rv["activities"]) for rv in kind_runs)
+    canon = list(max(sigs, key=lambda s: (sigs[s], len(s))) if sigs else ())
+    max_freq = max(sigs.values(), default=1)
+    paths = [{
+        "count": freq,
+        "seq": list(sig),
+        "label": _path_label(sig, canon, ident),
+        "rare": freq == 1 and len(sigs) > 1,
+        "width": max(6, round(freq / max_freq * 180)),
+    } for sig, freq in sigs.most_common()]
+
     return {
         "id": k.id,
         "name": kind_label(k),
         "count": len(k.case_ids),
         "actors": [a for a, _ in actors.most_common(6)],
-        "flow": [step_label(a) for a in canon],
+        "flow": canon,
         "paths": paths,
         "flagged": k.rejected,
         "flag_note": k.reject_reason or "",
@@ -250,6 +256,17 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
         artefact = ents[ev.entity_id].type if ev.entity_id in ents else "record"
         return activities.get(f"{artefact}/{ev.action}") or step_label(ev.action)
 
+    # action -> activity name where a verb maps to one activity across artefact
+    # types, so a MISSING step (which carries only a verb) still reads as the
+    # process activity, not the raw verb.
+    act2activity: dict = {}
+    for key, name in activities.items():
+        a = key.split("/", 1)[-1]
+        act2activity[a] = None if (a in act2activity and act2activity[a] != name) else name
+
+    def _act_name(action: str) -> str:
+        return act2activity.get(action) or action.replace("_", " ")
+
     # artefacts, in the run's real order — the evidence that will sit under the
     # activities. Each keeps its own verb, time, owner and source locator.
     arts = []
@@ -268,7 +285,9 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
                 "activity": _activity(ev),
                 "artefact": _ITEM_WORDS.get(art_type, (art_type, art_type))[0],
                 "ref": f"#{num}" if num else "",
-                "verb": step_label(ev.action),
+                # the artefact's own action, described plainly — this is evidence
+                # detail ("review requested"), not the inferred step name
+                "verb": ev.action.replace("_", " "),
                 "when": (ev.timestamp or "").split("T")[0] or "—",
                 "who": who, "inferred": False, "note": "",
                 "src": src, "is_url": src.startswith("http"),
@@ -305,7 +324,7 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
     for g in gaps:
         if g.kind == "missing_expected_step":
             act = g.id.split(":")[-1]
-            inferred.append({"name": step_label(act), "when": "not in the records",
+            inferred.append({"name": _act_name(act), "when": "not in the records",
                              "note": "expected here, no record",
                              "src": (g.evidence[0].locator if g.evidence else "")})
         elif g.kind == "reconciliation":

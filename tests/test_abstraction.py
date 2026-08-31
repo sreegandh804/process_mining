@@ -107,6 +107,20 @@ def test_kinds_are_named_by_the_model_not_left_generic():
     assert len(set(names["kinds"].values())) >= 2              # distinct, not one label
 
 
+def test_the_process_cards_show_activities_not_raw_verbs():
+    """The 'processes we found' cards read as the process — the same activity
+    spine as the runs — not the systems' artefact verbs. Regression: they were
+    left showing 'sent -> opened -> labeled -> merged -> closed'."""
+    m = _model()
+    v = build_view(m, activities=infer_activities(m, demo_activity_mapper()))
+    dev = next(p for p in v["processes"] if "Bug-fix" in p["name"] or "delivery" in p["name"].lower()
+               or any("Shipped" in s for s in p["flow"]))
+    assert "Shipped" in dev["flow"] and "Raised" in dev["flow"]
+    assert "merged" not in dev["flow"] and "opened" not in dev["flow"]
+    # variants are activity paths too
+    assert dev["paths"] and all(isinstance(s, str) for s in dev["paths"][0]["seq"])
+
+
 def test_every_inference_is_traceable_to_a_source_record():
     """Everything the engine shows resolves back to the artefact it was read from:
     each step's evidence carries a source locator, and a real URL is clickable."""
