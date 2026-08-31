@@ -55,10 +55,18 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
         gaps_by_case[g.case_id].append(g)
     kind_of_case = {cid: k for k in m.kinds for cid in k.case_ids}
 
-    # dominant item noun
-    dom_type = (Counter(c.anchor.get("type", "run") for c in m.cases.values()).most_common(1)
-                or [("run", 0)])[0][0]
-    item, items = _ITEM_WORDS.get(dom_type, (dom_type, dom_type + "s"))
+    # Collective noun. Labelling every run by the single most common anchor type
+    # ("pull request") overfits the moment a corpus is heterogeneous — a company
+    # runs many processes across many systems and products, not one kind of item.
+    # Use the specific noun ONLY when one type genuinely dominates; otherwise a
+    # neutral "run", and let the kinds section below carry the real diversity.
+    type_counts = Counter(c.anchor.get("type", "run") for c in m.cases.values())
+    dom_type, dom_n = (type_counts.most_common(1) or [("run", 0)])[0]
+    total = sum(type_counts.values()) or 1
+    if len(type_counts) <= 1 or dom_n / total >= 0.8:
+        item, items = _ITEM_WORDS.get(dom_type, (dom_type, dom_type + "s"))
+    else:
+        item, items = "run", "runs"      # mixed corpus — claim no single product
     item = names.get("item") or item
     items = names.get("items") or items
 
@@ -93,7 +101,7 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
 
     return {
         "meta": {
-            "title": f"How your {items} run",
+            "title": "How the work runs" if items == "runs" else f"How your {items} run",
             "corpus": _corpus_line(m, items),
             "scope": disclaimers_for(m),
             "ai_named": bool(names.get("_ai")),
@@ -336,8 +344,22 @@ def _deviation(case, kind, canon, gaps, step_label):
     return "usual", "—", False
 
 
+def _corpus_sources(m) -> list[str]:
+    """The distinct systems the corpus was read from, in friendly words."""
+    return sorted({_SRC_WORD.get(e.source.split(":")[0], e.source.split(":")[0])
+                   for e in m.shaped.entities
+                   if e.type != "person" and getattr(e, "source", "")})
+
+
+def _join_words(ws: list[str]) -> str:
+    if len(ws) <= 1:
+        return ws[0] if ws else "your systems"
+    return ", ".join(ws[:-1]) + " and " + ws[-1]
+
+
 def _corpus_line(m, items) -> str:
     mf = m.manifest or {}
+    srcs = _corpus_sources(m)
     if mf.get("source_kind") == "email":
         return (f"Read from <b>{mf.get('n_messages', '?')} emails</b> in {m.slug}. Nothing was "
                 f"entered by hand; the threads and who-did-what were worked out from the "
@@ -346,6 +368,12 @@ def _corpus_line(m, items) -> str:
         return (f"Read from <b>{m.slug}</b> — {mf.get('n_commits', '?')} records of activity. "
                 f"Nothing was entered by hand; it was worked out from your own history, and "
                 f"every line opens to the record it came from.")
+    if mf.get("source_kind") == "combined" or len(srcs) > 1:
+        n = mf.get("n_records") or sum(1 for e in m.shaped.entities if e.type != "person")
+        return (f"Read across <b>{_join_words(srcs)}</b> — {n} records, nothing entered by "
+                f"hand. The runs, the steps and who did what were worked out from the "
+                f"artefacts themselves; different systems, one process. Every step opens to "
+                f"the record it came from.")
     n = mf.get("n_rows", len(m.cases))
     sheets = len(mf.get("sheets", []) or [])
     where = f"{sheets} spreadsheet{'' if sheets == 1 else 's'}" if sheets else "your records"
