@@ -12,11 +12,12 @@ from induction.abstraction import (AnthropicActivityMapper, ScriptedActivityMapp
                                     infer_activities)
 from induction.adapters import Shaped, email_mbox, github_api
 from induction.inspector import build_view
+from induction.naming import infer_names
 from induction.pipeline import induce
 from induction.semantic import SemanticProvider
 from induction.steps.correlate import CorrelationPolicy
 from tests.combined_fixture import (GH_PAYLOAD, MAIL, SLUG, MAIL_SLUG,
-                                     demo_activity_mapper, demo_judge)
+                                     demo_activity_mapper, demo_judge, demo_namer)
 
 
 def _model():
@@ -92,3 +93,28 @@ def test_anthropic_mapper_is_a_noop_without_a_key(monkeypatch):
     empty map -> raw view, not a crash."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert AnthropicActivityMapper().map([{"artefact": "issue", "action": "opened", "examples": []}]) == {}
+
+
+def test_kinds_are_named_by_the_model_not_left_generic():
+    """The induced kinds get real, distinct names from the model (an injected
+    stand-in here), not Kind 1..n — the distinct processes / offerings a company
+    runs. Each name maps to a real kind id and they do not collide into one label."""
+    m = _model()
+    names = infer_names(m, namer=demo_namer)
+    assert names["_ai"] and names["kinds"]
+    assert set(names["kinds"]) == {k.id for k in m.kinds}      # every kind named
+    assert "Bug-fix delivery" in names["kinds"].values()
+    assert len(set(names["kinds"].values())) >= 2              # distinct, not one label
+
+
+def test_every_inference_is_traceable_to_a_source_record():
+    """Everything the engine shows resolves back to the artefact it was read from:
+    each step's evidence carries a source locator, and a real URL is clickable."""
+    m = _model()
+    v = build_view(m, activities=infer_activities(m, demo_activity_mapper()))
+    sso = _sso_run(v)
+    all_arts = [a for n in sso["activities"] for a in n["arts"]]
+    assert all_arts and all(a["src"] for a in all_arts)        # nothing without a source
+    assert any(a["is_url"] for a in all_arts)                  # GitHub artefacts open ↗
+    # the cross-source join itself is traceable — the model's reason is on the run
+    assert "model" in sso["tier"] and sso["why"]

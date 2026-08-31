@@ -30,12 +30,34 @@ _SYSTEM = (
 )
 
 
-def infer_names(model, enable: bool = False, api_model: str | None = None) -> dict:
+def _clean(names: dict) -> dict:
+    """Guardrail: keep only naming keys, ignore anything else the model returned.
+    A namer may name; it may not add a step, a run, or a finding."""
+    return {
+        "item": str(names.get("item", "")) or None,
+        "items": str(names.get("items", "")) or None,
+        "steps": {str(k): str(v) for k, v in (names.get("steps") or {}).items()},
+        "kinds": {str(k): str(v) for k, v in (names.get("kinds") or {}).items()},
+        "_ai": True,
+    }
+
+
+def infer_names(model, enable: bool = False, api_model: str | None = None, namer=None) -> dict:
     """Return {item, items, steps:{action:Name}, kinds:{id:Name}} or {} if disabled.
 
-    `enable` must be explicitly true (an LLM call spends money) AND an API key must
-    resolve, or this is a no-op.
+    `namer` (a callable ``payload -> raw names``) is the injection seam: the demo
+    passes an offline stand-in, tests a scripted one, and the whole naming path is
+    exercised without a key. With no namer, the real Anthropic path runs — and
+    only when `enable` is true (an LLM call spends money) AND a key resolves.
     """
+    payload = _payload(model)
+    if namer is not None:
+        try:
+            return _clean(namer(payload))
+        except Exception as e:  # naming is a convenience; never break the run
+            print(f"[names] namer skipped ({type(e).__name__}: {e})")
+            return {}
+
     if not enable or not os.environ.get("ANTHROPIC_API_KEY"):
         return {}
     try:
@@ -43,8 +65,6 @@ def infer_names(model, enable: bool = False, api_model: str | None = None) -> di
     except ImportError:
         print("[names] --names llm needs the Anthropic SDK: pip install anthropic")
         return {}
-
-    payload = _payload(model)
     try:
         client = anthropic.Anthropic()
         msg = client.messages.create(
@@ -54,15 +74,7 @@ def infer_names(model, enable: bool = False, api_model: str | None = None) -> di
             messages=[{"role": "user", "content": _prompt(payload)}],
         )
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-        names = _parse(text)
-        # Guardrail: keep only naming keys; ignore anything else the model returned.
-        return {
-            "item": str(names.get("item", "")) or None,
-            "items": str(names.get("items", "")) or None,
-            "steps": {str(k): str(v) for k, v in (names.get("steps") or {}).items()},
-            "kinds": {str(k): str(v) for k, v in (names.get("kinds") or {}).items()},
-            "_ai": True,
-        }
+        return _clean(_parse(text))
     except Exception as e:  # naming is a convenience; never break the run
         print(f"[names] LLM naming skipped ({type(e).__name__}: {e})")
         return {}

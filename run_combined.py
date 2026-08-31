@@ -115,7 +115,13 @@ def main(argv=None) -> int:
     print(f"[run] {n_records} records from {n_sources} sources · semantic={mode}")
     m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=provider),
                manifest={"source_kind": "combined", "n_records": n_records})
-    names = infer_names(m, enable=(args.names == "llm"))
+    # Name the kinds (and item) with the model — offline stand-in for --demo, the
+    # real Anthropic namer when the AI is on.
+    if args.demo:
+        from tests.combined_fixture import demo_namer
+        names = infer_names(m, namer=demo_namer)
+    else:
+        names = infer_names(m, enable=(args.names == "llm" or args.semantic in ("llm", "hybrid")))
 
     # AI-first process abstraction: the model groups the artefact verbs into the
     # activities the process is made of. Demo uses an offline stand-in; a real

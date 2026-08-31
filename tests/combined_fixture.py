@@ -157,6 +157,26 @@ def demo_activity_mapper():
     })
 
 
+def demo_namer(payload):
+    """OFFLINE stand-in for the naming model, for `--demo`. Names each induced
+    KIND from its own features (adapting to whatever ids the segmenter produced),
+    the way the real model would from the same payload — an automated cluster, a
+    review-and-merge cluster, everything else. Live, `infer_names` calls Anthropic;
+    the engine holds none of these names."""
+    kinds = {}
+    for k in payload.get("kinds", []):
+        ex = " ".join(k.get("examples", [])).lower()   # the model names from these
+        if k.get("automated"):
+            name = "Automated build notices"
+        elif any(w in ex for w in ("fail", "error", "bug", "times out", "broken",
+                                    "export", "login", "refresh", "outage")):
+            name = "Bug-fix delivery"
+        else:
+            name = "Team coordination"
+        kinds[k["id"]] = name
+    return {"kinds": kinds, "steps": {}}
+
+
 def _m(mid, frm, subj, date, body, irt=None):
     h = (f"Message-ID: <{mid}>\nFrom: {frm}\nTo: team@northwind.com\n"
          f"Date: {date}\nSubject: {subj}\n")
