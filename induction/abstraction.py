@@ -173,6 +173,9 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
 
 # How many records to show the vocabulary-discovery pass. Enough to see the
 # corpus's real range, small enough to be one call.
+# Both are cost/quality judgements, not measurements: enough of the corpus to
+# see its range in one call, and a batch small enough that a truncated reply
+# loses 25 readings rather than all of them.
 _DISCOVERY_SAMPLE = 150
 _CLASSIFY_BATCH = 25
 
@@ -523,6 +526,10 @@ def _reproject(m, abstraction: "Abstraction") -> None:
     `model.json` all say the same thing — and the finding ("executed with no
     approval on record") is a real `Gap` with evidence, not a label in a chart.
     """
+    from collections import defaultdict
+
+    from induction.model import direct, model
+    from induction.process import Step
     from induction.steps.gaps_generic import infer_missing_step_gaps
     from induction.steps.variants import induced_variants
 
@@ -552,6 +559,29 @@ def _reproject(m, abstraction: "Abstraction") -> None:
         kind.variants, kind.dfg = induced_variants(kind.case_ids, m.cases)
         kind.steps = sorted({a for v in kind.variants for a in v.signature})
 
-    # 3. the one detector, re-run now that a common path has more than one step
+    # 3. the step catalogue. `label.py` built it during induce(), keyed on the raw
+    #    verb — so without this `model.json` ships two disagreeing vocabularies:
+    #    `steps: [step:sent]` beside cases whose traces say `Requested`, and a
+    #    consumer joining on `step:{action}` finds nothing for a read activity.
+    #    The tier moves with the provenance: a step every one of whose records was
+    #    read is a `model` claim, not the `direct` one label.py could make.
+    by_activity: dict[str, list] = defaultdict(list)
+    for ev in m.shaped.events:
+        by_activity[activity(ev.id) or ev.action].append(ev)
+    m.steps = []
+    for name, evs in sorted(by_activity.items(), key=lambda kv: -len(kv[1])):
+        members = sorted({e.actor for e in evs if e.actor})
+        n_read = sum(1 for e in evs if e.id in abstraction.by_record)
+        m.steps.append(Step(
+            id=f"step:{name}", name=name, action=name,
+            confidence=(model(f"read from the records' own words ({n_read} of "
+                              f"{len(evs)} records)") if n_read
+                        else direct("named from the source's own action verb")),
+            member_ids=members, event_ids=[e.id for e in evs],
+            evidence=[e.evidence[0] for e in evs[:3] if e.evidence],
+            attrs={"count": len(evs), "n_members": len(members), "n_read": n_read},
+        ))
+
+    # 4. the one detector, re-run now that a common path has more than one step
     m.gaps = [g for g in m.gaps if g.kind != "missing_expected_step"]
     m.gaps.extend(infer_missing_step_gaps(m.correlation, m.kinds))

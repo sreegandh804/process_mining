@@ -50,6 +50,17 @@ class TopicPolicy:
     Every default here is set to *decline*: refinement has to earn its place
     against a cluster big enough for a split to mean something, with groups big
     enough not to be noise.
+
+    **Where these numbers came from**, because that is a fair question and the
+    answer differs per knob:
+
+      - `min_dominance` is MEASURED — the corpora in this repo separate cleanly
+        either side of it, and the figures are in its comment below.
+      - the rest are JUDGEMENT CALLS, set conservatively and fitted to the four
+        corpora that were available (a git repo, two spreadsheets, a mailbox).
+        They are not claimed to generalise. Each says what it is guarding
+        against; a corpus that breaks one should move the number and record why,
+        not add a special case beside it.
     """
 
     enabled: bool = True
@@ -65,7 +76,8 @@ class TopicPolicy:
     min_dominance: float = 0.9
     # Below this a cluster is one kind until proven otherwise — a handful of
     # runs cannot evidence a split, and over-fitting a tiny corpus into topics
-    # is exactly the invented structure this engine exists to avoid.
+    # is exactly the invented structure this engine exists to avoid. Judgement:
+    # 25 is "enough runs that a split could mean something", not a measurement.
     min_cases: int = 25
     # A group smaller than this is not a kind; its runs stay in the parent.
     # Both a floor and a share, because the floor alone does not travel: 3 out of

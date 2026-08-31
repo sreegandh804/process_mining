@@ -451,13 +451,21 @@ _DETECT_SAMPLE = 5000
 _ACTOR_HINTS = ("user", "actor", "resource", "performer", "who", "operator", "agent", "owner")
 # A case is a run, not a bucket: beyond this many rows per group the column is an
 # attribute everything shares, not an identity.
+# The four numbers below are JUDGEMENT CALLS, unlike `_TRANSPORT_RATIO` in
+# abstraction.py which is measured. They were set against the corpora on hand —
+# an AP event log, two tracker exports, a UI recording — and are not claimed to
+# generalise. They exist so detection DECLINES rather than guesses; when it
+# declines, `--case-column`/`--activity-column` say what the file is, and that
+# override is the intended answer to a corpus these numbers get wrong.
 _MAX_EVENTS_PER_CASE = 100
 # More labels than this and it is free text, not a step vocabulary.
 _MAX_ACTIVITIES = 100
 # What share of a case's rows must carry a distinct activity value.
 _MIN_ACTIVITY_DENSITY = 0.5
 # How unique an identity column must be. Not 1.0: a real export has duplicate
-# and blank keys, and those are findings, not grounds to reject the file.
+# and blank keys, and those are findings, not grounds to reject the file. The
+# most fitted number here — chosen after samples/finance's invoice_id measured
+# 0.90, so it is a floor set just under one observation, not a calibration.
 _MIN_ID_UNIQUENESS = 0.85
 
 
