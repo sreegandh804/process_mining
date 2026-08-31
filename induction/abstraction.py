@@ -432,8 +432,14 @@ class AnthropicRecordClassifier(RecordClassifier):
         "a process analyst would call a step (e.g. Requested, Reviewed, Approved, "
         "Escalated, Confirmed, Informed). Derive them from THIS sample only; do not "
         "return a generic taxonomy, and do not return an activity the sample does not "
-        "show. Prefer 4-8 activities. Return ONLY JSON: "
-        '{"activities": ["<Name>", ...]}'
+        "show. Prefer 4-8 activities.\n"
+        "NEVER return an activity that merely restates how the record travelled — "
+        "'Corresponded by Email', 'Relayed to Others', 'Sent a Message', 'Forwarded' "
+        "are the system's verb in more words, and naming them defeats the point of "
+        "reading the text at all. Every activity must say what the WORK was. If a "
+        "record only passes something along, that is for the classifier to decline, "
+        "not for you to name.\n"
+        'Return ONLY JSON: {"activities": ["<Name>", ...]}'
     )
     _CLASSIFY_SYSTEM = (
         "You assign each record exactly one ACTIVITY from the list given, and quote the "
