@@ -459,7 +459,7 @@ induction/
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
   abstraction.py     artefact verbs -> activities: the verb map, and (where the verb
                      is only transport) reading the record itself
-  semantic.py        the model tier's judge/embedder seams (default on; --semantic hybrid adds embeddings)
+  semantic.py        the model tier's judge/embedder seams (default on; --hybrid adds embeddings)
   profiles.py        where domain vocabulary lives (generic default; git / accounting)
   adapters/          git_history.py, changelog.py, github_api.py, email_mbox.py,
                      tabular.py (wide tracker exports AND long event logs)

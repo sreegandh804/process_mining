@@ -25,7 +25,7 @@ that baseline outright.
     python run_combined.py --github portal.github.json --mail team.mbox --no-llm
 
     # add the embedding shortlist (needs VOYAGE_API_KEY too):
-    python run_combined.py --github portal.github.json --mail team.mbox --semantic hybrid
+    python run_combined.py --github portal.github.json --mail team.mbox --hybrid
 
 `--github` is a JSON payload ({"slug","issues","pulls"}, the shape
 `ingest_github.py` writes); `--mail` is a maildir dir, an .mbox, or a CSV with a
@@ -81,11 +81,10 @@ def main(argv=None) -> int:
     ap.add_argument("--github-slug", help="repo slug, e.g. owner/name (else read from the JSON)")
     ap.add_argument("--mail", help="maildir dir, .mbox file, or emails.csv")
     ap.add_argument("--mail-slug", help="a name for the mailbox")
-    ap.add_argument("--semantic", choices=["auto", "off", "llm", "hybrid"], default="auto",
-                    help="model tier (default: auto — on if ANTHROPIC_API_KEY is set, else "
-                         "deterministic). 'hybrid' adds an embedding shortlist (VOYAGE_API_KEY).")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic, offline baseline (no naming/abstraction/judge)")
+    ap.add_argument("--hybrid", action="store_true",
+                    help="add an embedding shortlist to the semantic judge (needs VOYAGE_API_KEY)")
     ap.add_argument("--names", choices=["auto", "off"], default="auto",
                     help="'off' keeps raw activity verbs even when the model tier is on")
     ap.add_argument("--out-dir", default="out")
@@ -100,8 +99,9 @@ def main(argv=None) -> int:
         if not (args.github or args.mail):
             ap.error("give --github and/or --mail, or --demo")
         # One decision drives the whole model tier: the judge, the namer and the
-        # record reader. Off / no key -> deterministic, and the label says so.
-        tier = resolve(args.semantic, no_llm=args.no_llm)
+        # record reader. On by default; --no-llm (or no key) -> deterministic, and
+        # the label says so. --hybrid adds the embedding shortlist.
+        tier = resolve("hybrid" if args.hybrid else "auto", no_llm=args.no_llm)
         shaped, slug = _load_real(Path(args.github) if args.github else None, args.github_slug,
                                   Path(args.mail) if args.mail else None, args.mail_slug)
         provider = tier.semantic()
