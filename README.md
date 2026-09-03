@@ -35,9 +35,19 @@ engine — no clone, no network:
 python run_tabular.py                       # samples/finance CSV (invoices + bank)
 python run_tabular.py --dir samples/grants  # a grant-making tracker
 python run_tabular.py --profile accounting  # friendly names for finance
-python run_tabular.py --names llm           # let Claude name the processes/steps
+python run_tabular.py --no-llm              # deterministic baseline, no AI naming
 python run_tabular.py --xlsx                # read the .xlsx sheets (needs openpyxl)
 ```
+
+The **model tier is on by default** in the runners (`run.py`, `run_tabular.py`,
+`run_email.py`, `run_combined.py`): the Claude naming + activity-abstraction pass
+(and, on multi-source runs, the semantic-correlation judge) runs when
+`ANTHROPIC_API_KEY` is set. With **no key it downshifts to the deterministic,
+offline baseline and says so on the first line** — never a deterministic run
+wearing an AI label — and `--no-llm` forces that baseline outright. The *library*
+core is unchanged: `induce()` is still deterministic and offline by default, so
+the flip lives only at the runner seam, and every model-tier claim is still tier
+`model` with its evidence.
 
 Run the tests with `pytest` (or `make test`). The core suite is offline and
 stdlib-only; the held-out-slice tests activate once `pallets/click` is cached
@@ -107,8 +117,8 @@ direct    read straight from the source (present as data)
 joined    deterministic join on a shared key (commit↔PR number, the git DAG)
 heuristic rule-based inference (reference similarity, actor+time proximity)
 model     LLM inference — same-work judgement, and reading an activity
-          out of a record whose verb carries none (opt-in; embeddings
-          remain the unbuilt rung behind the same seam)
+          out of a record whose verb carries none (default on, --no-llm to
+          disable; embeddings remain the unbuilt rung behind the same seam)
 ```
 
 A claim's tier *is* its confidence. The confidence of a chain of inferences is
@@ -280,9 +290,10 @@ whatever the model induced (no domain words baked in). It shows:
   **every step — including an inferred, dashed one we didn't see — resolves to its
   exact source record** (a row, a sha).
 
-Process/step **names** come from the profile, or optionally an LLM naming pass
-(`--names llm`, tier `model`, shown as "names suggested by AI"); the LLM only
-*names*, never touches structure. Without it, activities read as their raw verbs.
+Process/step **names** come from the profile, or from the LLM naming/abstraction
+pass, which is **on by default** (tier `model`, shown as "names suggested by AI");
+the LLM only *names* and *groups*, never touches structure. With `--no-llm` (or
+no key), activities read as their raw verbs.
 
 ---
 
@@ -439,7 +450,8 @@ run_email.py         a mailbox on its own
 samples/finance/     non-git demo corpus (invoices + payments, CSV & XLSX)
 samples/grants/      a second non-git corpus (a grant-making tracker)
 induction/
-  naming.py          OPTIONAL LLM naming of kinds/steps (tier model; --names llm)
+  naming.py          LLM naming of kinds/steps (tier model; default on, --no-llm off)
+  model_tier.py      resolves the model tier: default ON, honest downshift with no key
   model.py           Entity / Event / Observation, Evidence, Confidence (tiers)
   refs.py            cross-reference extraction (+ the tier each kind earns)
   links.py           the link vocabulary adapters declare into (the correlation seam)
@@ -447,7 +459,7 @@ induction/
   process.py         induced-model vocabulary (Case, Variant, Step, Gap, Orphan, Kind)
   abstraction.py     artefact verbs -> activities: the verb map, and (where the verb
                      is only transport) reading the record itself
-  semantic.py        the model tier's judge/embedder seams (opt-in, --semantic llm)
+  semantic.py        the model tier's judge/embedder seams (default on; --hybrid adds embeddings)
   profiles.py        where domain vocabulary lives (generic default; git / accounting)
   adapters/          git_history.py, changelog.py, github_api.py, email_mbox.py,
                      tabular.py (wide tracker exports AND long event logs)
