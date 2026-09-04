@@ -63,13 +63,28 @@ git history · GitHub issues/PRs · changelog · spreadsheets (CSV/XLSX — wide
 trackers *and* long event logs) · email (maildir / mbox / CSV). **A new source is a
 new adapter (+ an optional naming profile), not a new engine.**
 
-## Quickstart
+## Try it — three bundled samples
+
+Everything below is **real data, in the repo, runnable offline right now**. No
+clone, no network, no key needed.
+
+| sample | what the data is | run it |
+|---|---|---|
+| **`samples/finance/`** | A small firm's **invoice approval & payment**: an invoice tracker (raised → submitted → approved → paid) plus a **bank payments** export that cross-references it on `invoice_id`. Deliberately messy — blank dates, a duplicate row, three date formats, a payment for an invoice that doesn't exist. | `python run_tabular.py` |
+| **`samples/grants/`** | A **grant-making tracker** (applied → reviewed → decided → paid → reported). A second, unrelated domain through the same engine — a new `TableSpec`, not new code. | `python run_tabular.py --dir samples/grants` |
+| **`samples/enron/`** | **263 real emails** from 3 Enron custodians (`kaminski-v`, `germany-c`, `jones-t`), curated so every subject-thread is a **complete conversation** — 76 threads, all ≥2 messages, no stray singletons (the engine induces 57 runs, 0 orphans). The genuine thin end: real RFC-822 with **no `In-Reply-To` headers at all**, so threads are earned from subject + fuzzy text/time, not a given key. | `python run_email.py --path samples/enron` |
+
+The Enron sample is a subset of the public
+**[Enron email dataset](https://www.kaggle.com/datasets/wcukierski/enron-email-dataset)**
+(the FERC corpus) — real corporate correspondence, not synthetic. It is the
+sample that shows why the model tier exists: an email's verb is only *transport*,
+so **without a key its steps read `sent → sent`**; with `ANTHROPIC_API_KEY` set,
+the record-reading pass turns those into real activities (Requested, Approved, …),
+each quoting the line it was read from.
 
 ```bash
-python run_tabular.py                  # spreadsheets (invoices + bank), no git/network
+python run_combined.py --demo          # two sources at once (offline demo, no key)
 python run.py                          # a git corpus (after: python ingest.py …)
-python run_email.py --path inbox.mbox  # a mailbox
-python run_combined.py --demo          # two sources at once (offline demo)
 ```
 
 The **LLM tier is on by default** (activity naming + reading; needs
