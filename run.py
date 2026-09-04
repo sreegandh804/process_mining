@@ -46,7 +46,13 @@ def main(argv: list[str] | None = None) -> int:
                          "is set, else the deterministic baseline). 'llm' insists on it.")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic baseline (raw verbs, no AI naming/abstraction)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="stream each inferred join / kind / gap as it is decided")
+    ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
+
+    from induction.progress import from_flags
+    prog = from_flags(quiet=args.quiet, verbose=args.verbose)
 
     from induction.profiles import GENERIC_PROFILE, GIT_PROFILE
     profile = {"generic": GENERIC_PROFILE, "git": GIT_PROFILE, "auto": "auto"}[args.profile]
@@ -69,14 +75,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[run] inducing processes from {args.slug} (profile: {args.profile}) "
           f"· model tier: {tier.label} ...")
     m = run_pipeline(args.slug, args.raw_dir, with_thin=not args.no_thin,
-                     with_github=args.with_github, profile=profile)
+                     with_github=args.with_github, profile=profile, progress=prog)
 
     from induction.abstraction import infer_activities
     from induction.naming import infer_names
-    names = infer_names(m, enable=tier.names_enable())
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
     # The verb map groups git's own verbs into activities; the record reader is
     # gated on records-per-activity and simply won't fire on a git corpus.
-    activities = infer_activities(m, tier.mapper(), tier.classifier())
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
     html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)
