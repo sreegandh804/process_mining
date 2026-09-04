@@ -170,29 +170,36 @@ def _case_text(case, entities_by_id) -> str:
 
 
 def _split_by_read_process(clusters: dict, case_process: dict,
-                           min_cases: int = DEFAULT_TOPIC_POLICY.min_topic_cases):
+                           policy: TopicPolicy = DEFAULT_TOPIC_POLICY):
     """Split each structural cluster by the process its runs were READ into.
 
-    Two refusals, both borrowed from `_refine_by_topic` because the reasoning is
-    identical and the numbers should not diverge:
+    Two refusals, both taken from `_refine_by_topic` — not because a mailbox
+    needs them, but because the question ("is this group big enough to be a
+    kind?") is the same question whatever read the group, and two paths answering
+    it with different numbers is how a corpus starts getting special-cased:
 
       - a run the reading did not place stays in its parent cluster; an
         unexplained run is not a one-run process, and
-      - a family that ends up with fewer than `min_cases` runs is folded back
-        into the parent. The reading proposes families from a *sample*, so a
-        family of one is over-splitting, not a rare process.
+      - a family below `max(min_topic_cases, len * min_topic_share)` is folded
+        back into the parent. **Both** terms matter, and using only the floor was
+        a bug: `topics.py` puts the reason plainly — 3 out of 40 is a topic,
+        3 out of 509 is a splinter. A flat floor is tuned to whatever corpus was
+        in front of you when you picked it, which is exactly the overfitting this
+        engine is supposed to refuse. The share makes it scale-free.
     """
     out: dict[tuple, list[str]] = {}
     terms_by_key: dict[tuple, str] = {}
     for key, case_ids in clusters.items():
+        floor = max(policy.min_topic_cases,
+                    round(len(case_ids) * policy.min_topic_share))
         by_process: dict[str, list[str]] = defaultdict(list)
         unplaced: list[str] = []
         for cid in case_ids:
             proc = case_process.get(cid)
             (by_process[proc] if proc else unplaced).append(cid)
-        for proc, ids in by_process.items():
-            if len(ids) < min_cases:
-                unplaced.extend(ids)          # too few to be a kind of its own
+        for proc, ids in sorted(by_process.items()):
+            if len(ids) < floor:
+                unplaced.extend(ids)          # too few here to be a kind of its own
                 continue
             sub_key = key + (("process", proc),)
             out.setdefault(sub_key, []).extend(ids)

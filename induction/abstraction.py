@@ -76,14 +76,17 @@ class AnthropicActivityMapper(ActivityMapper):
         "example text. Group the pairs that are the SAME real activity — across "
         "artefact types and systems (an issue 'opened' and an email 'sent' reporting "
         "a bug are both 'Raised'; a pull request 'merged' and an issue 'closed' are "
-        "'Shipped') — and give each group a short human activity name. You may NAME "
-        "and GROUP only: do not invent an activity no pair evidences.\n"
-        "NEVER return a name that just restates how the record travelled — "
-        "'Correspondence Sent', 'Email Forwarded', 'Message Posted' are the verb in "
-        "more words and say nothing about the work. If a verb genuinely carries no "
-        "activity (a mailbox records only that something was sent), map it to the "
-        "single plainest word you can and STOP; a later pass reads the record "
-        "itself. Padding the verb hides from that pass that it is needed.\n"
+        "'Shipped' — these illustrate the SHAPE of the grouping, not a vocabulary to "
+        "reuse) — and give each group a short human activity name drawn from this "
+        "corpus's own subject matter. You may NAME and GROUP only: do not invent an "
+        "activity no pair evidences.\n"
+        "NEVER return a name that just restates how the record travelled or was "
+        "filed — 'Correspondence Sent', 'Email Forwarded', 'Message Posted' are the "
+        "verb in more words and say nothing about the work. If a verb genuinely "
+        "carries no activity (a system that records only that something was sent, "
+        "posted or uploaded), map it to the single plainest word you can and STOP; a "
+        "later pass reads the record itself. Padding the verb hides from that pass "
+        "that it is needed.\n"
         'Return ONLY JSON: {"map": {"<artefact>/<verb>": "<Activity Name>"}} '
         "covering every pair."
     )
@@ -435,10 +438,18 @@ def _events_needing_a_reading(m, by_vocab: dict, types: dict) -> list:
     Corpus-wide medians over every corpus in the repo, which is what this branch
     turns on:
 
-        samples/finance   1.00 (13 runs)     samples/grants  1.00 (20 runs)
-        pallets/flask     1.33 (312 runs)    samples/enron   2.00 (57 runs)
+        samples/finance   1.00 (13 runs)     pallets/flask   1.33 (312 runs)
+        samples/grants    1.00 (20 runs)     pallets/click   1.50 (372 runs)
+        unifyai/ivy       1.50 (440 runs)    samples/enron   2.00 (57 runs)
 
-    Only the mailbox reaches the bar, and it reaches it on its own verbs.
+    Only the mailbox reaches the bar, and it reaches it on its own verbs. Note
+    the margin, though, because it is the honest weakness here: the two busiest
+    git corpora sit at 1.50, half a step below the line, and a repo with chattier
+    commit verbs could cross it. This branch WIDENS what gets read, and it is
+    justified on six corpora — a small sample. Re-measure it when a seventh
+    arrives rather than assuming it still holds; a source that trips it wrongly
+    pays in tokens and in relabelled steps, and `n_unclassified` is where that
+    would show.
 
     A rejected kind is left alone: reading a nightly build notice more closely
     will not make it a process.
@@ -486,6 +497,28 @@ def _record_text(ev, m) -> str:
     return _text_of(ent, DEFAULT_POLICY.fuzzy.text_attrs)[:1200]
 
 
+def _spread(records: list, n: int) -> list:
+    """`n` records drawn evenly across the corpus, not the first `n` of it.
+
+    The discovery pass proposes the whole corpus's vocabulary from this sample,
+    so what the sample over-represents, the vocabulary over-fits. Records arrive
+    grouped — by kind, and within a kind by whatever order the adapter walked the
+    source (for a maildir, one mailbox and one folder at a time). Taking the head
+    therefore asks one corner of the corpus to name the processes for all of it:
+    on the repo's Enron sample the first 150 of 263 records are dominated by the
+    earliest folders, and the later mailboxes get no vote at all.
+
+    An even stride is the cheapest fix that has no parameters to tune and no
+    randomness to make a run irreproducible.
+    """
+    if n <= 0 or not records:
+        return []
+    if len(records) <= n:
+        return list(records)
+    step = len(records) / n
+    return [records[int(i * step)] for i in range(n)]
+
+
 def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=None) -> None:
     """Discover the corpus's activity vocabulary, then read each record into it."""
     log = log or (lambda m: None)
@@ -504,7 +537,7 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
 
     log(f"abstraction: verbs are transport, reading {len(records)} records "
         f"(discovering the vocabulary from a sample of {min(len(records), _DISCOVERY_SAMPLE)})")
-    sample = [r["text"] for r in records[:_DISCOVERY_SAMPLE]]
+    sample = [r["text"] for r in _spread(records, _DISCOVERY_SAMPLE)]
     try:
         vocab = classifier.discover(sample)
     except Exception as e:                # the tier is a convenience, never a blocker
@@ -652,26 +685,31 @@ class AnthropicRecordClassifier(RecordClassifier):
     """
 
     _DISCOVER_SYSTEM = (
-        "You are given a sample of raw records from ONE company system (emails, chat "
-        "messages, notes). Each records that something happened, but the system's own "
-        "verb ('sent') says nothing about WHAT. Read the sample and return TWO "
-        "vocabularies, both derived from THIS sample only.\n"
+        "You are given a sample of raw records from ONE system of record. Each records "
+        "that something happened, but the system's own verb for it (such as 'sent', "
+        "'posted', 'uploaded', 'logged') describes only how the record was filed, not "
+        "WHAT was done. Read the sample and return TWO vocabularies, both derived from "
+        "THIS sample only.\n"
         "\n"
         "1. ACTIVITIES — what a record DOES; the kind of thing a process analyst calls "
-        "a step (e.g. Requested, Reviewed, Approved, Escalated, Confirmed, Informed). "
-        "Prefer 4-8.\n"
+        "a step. Prefer 4-8.\n"
         "2. PROCESSES — what a record is ABOUT; the recurring families of work this "
-        "corpus is a record of (e.g. Contract execution, Invoice dispute, Campus "
-        "recruiting, Deal approval). A process is a family that RECURS across many "
-        "records, never one specific deal, person, or counterparty. Prefer 3-8.\n"
+        "corpus is a record of. A process is a family that RECURS across many records, "
+        "never one specific case, person, or counterparty. Prefer 3-8.\n"
+        "\n"
+        "The domain is whatever the sample says it is — engineering, clinical, "
+        "logistics, legal, manufacturing, support. Take every name from the sample's "
+        "own subject matter and vocabulary. Do not reach for the vocabulary of office "
+        "administration, or any other domain, unless the records are actually about "
+        "it, and do not return a generic taxonomy.\n"
         "\n"
         "NEVER return an activity or a process that merely restates how the record "
-        "travelled — 'Corresponded by Email', 'Relayed to Others', 'Sent a Message', "
-        "'Forwarded', 'Correspondence Sharing' are the system's verb in more words, "
-        "and naming them defeats the point of reading the text at all. Both lists must "
-        "say what the WORK was. Do not return a generic taxonomy, and do not return a "
-        "name the sample does not show. If a record only passes something along, that "
-        "is for the classifier to decline, not for you to name.\n"
+        "travelled or was filed. A name that would still be true if the contents were "
+        "replaced with completely different work is not a name — it is the system's "
+        "verb in more words, and returning it defeats the point of reading the text at "
+        "all. Both lists must say what the WORK was. Do not return a name the sample "
+        "does not show. If a record only passes something along, that is for the "
+        "classifier to decline, not for you to name.\n"
         'Return ONLY JSON: {"activities": ["<Name>", ...], "processes": ["<Name>", ...]}'
     )
     _CLASSIFY_SYSTEM = (

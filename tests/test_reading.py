@@ -373,3 +373,68 @@ def test_no_process_vocabulary_leaves_segmentation_alone(families):
     assert abstraction.by_record            # steps were still read
     assert abstraction.by_case == {}        # but nothing was re-segmented
     assert [k.name for k in m.kinds] == before
+
+
+def test_the_family_floor_scales_with_the_corpus():
+    """3 out of 40 is a process; 3 out of 500 is a splinter.
+
+    A flat floor is tuned to whatever corpus was in front of you when you picked
+    it. `topics.py` already answers this with a floor AND a share, and the read
+    path must answer it the same way or the two disagree the moment a corpus is
+    a different size.
+    """
+    from induction.steps.segment import _split_by_read_process
+
+    small = {("k",): [f"c{i}" for i in range(40)]}
+    big = {("k",): [f"c{i}" for i in range(500)]}
+    place = lambda ids: {c: ("Rare" if i < 3 else "Common")
+                         for i, c in enumerate(ids)}
+
+    out, terms = _split_by_read_process(small, place(small[("k",)]))
+    assert "Rare" in terms.values(), "3 of 40 is a family"
+
+    out, terms = _split_by_read_process(big, place(big[("k",)]))
+    assert "Rare" not in terms.values(), "3 of 500 is a splinter"
+    assert sum(len(v) for v in out.values()) == 500, "no run may be dropped"
+
+
+def test_no_run_is_ever_lost_or_duplicated_by_a_split():
+    """The split is a partition. Whatever the floor decides, every run comes out
+    exactly once — a kind that quietly drops runs is worse than no kind."""
+    from induction.steps.segment import _split_by_read_process
+
+    clusters = {("a",): [f"a{i}" for i in range(30)],
+                ("b",): [f"b{i}" for i in range(12)]}
+    process = {}
+    for i in range(30):
+        process[f"a{i}"] = ["X", "Y", "Z"][i % 3]
+    for i in range(0, 12, 2):
+        process[f"b{i}"] = "W"          # half of b placed, half declined
+    out, _ = _split_by_read_process(clusters, process)
+    got = [cid for ids in out.values() for cid in ids]
+    assert sorted(got) == sorted(cid for ids in clusters.values() for cid in ids)
+    assert len(got) == len(set(got))
+
+
+def test_the_discovery_sample_is_drawn_across_the_whole_corpus():
+    """The sample names the vocabulary for every record, so what it
+    over-represents, the vocabulary over-fits. Records arrive grouped by kind and
+    by whatever order the adapter walked the source, so the head of the list is
+    one corner of the corpus, not a picture of it."""
+    from induction.abstraction import _spread
+
+    corpus = list(range(263))
+    got = _spread(corpus, 150)
+    assert len(got) == len(set(got)) == 150
+    assert got == sorted(got), "order is preserved; only the stride is imposed"
+    # every third of the corpus is represented in roughly its true proportion
+    for lo, hi in ((0, 88), (88, 176), (176, 263)):
+        share = sum(1 for x in got if lo <= x < hi) / 150
+        assert 0.28 < share < 0.39, (lo, hi, share)
+
+
+def test_a_corpus_smaller_than_the_sample_is_taken_whole():
+    from induction.abstraction import _spread
+    assert _spread([1, 2, 3], 150) == [1, 2, 3]
+    assert _spread([], 150) == []
+    assert _spread([1, 2, 3], 0) == []
