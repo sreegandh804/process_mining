@@ -507,3 +507,60 @@ def test_a_kind_with_no_shared_step_expects_nothing():
         for i in range(6)
     ])
     assert _canonical_order(kind) == []
+
+
+# --- steps belong to their process -------------------------------------------
+
+def test_a_step_may_not_be_borrowed_from_another_process():
+    """The reason steps are nested rather than flat. `Onsite interview` is a real
+    step and is still wrong on a record placed in invoice settlement — a flat
+    vocabulary check would wave it through."""
+    from induction.abstraction import ReadVocabulary, _clean_readings
+
+    vocab = ReadVocabulary(steps_by_process={
+        "Hiring": ["CV screened", "Onsite interview", "Offer made"],
+        "Invoice settlement": ["Invoice raised", "Payment received"],
+    })
+    batch = [{"id": "r1", "text": "..."}, {"id": "r2", "text": "..."}]
+    got = _clean_readings({
+        "r1": {"process": "Hiring", "step": "Onsite interview", "span": "came in Tuesday"},
+        "r2": {"process": "Invoice settlement", "step": "Onsite interview",
+               "span": "came in Tuesday"},
+    }, batch, vocab)
+    assert set(got) == {"r1"}
+    assert got["r1"] == {"activity": "Onsite interview", "span": "came in Tuesday",
+                         "process": "Hiring"}
+
+
+def test_a_record_with_no_process_may_only_take_a_loose_step():
+    """A record the model would not place in a family cannot then be given that
+    family's step — that would be the placement smuggled back in."""
+    from induction.abstraction import ReadVocabulary, _clean_readings
+
+    vocab = ReadVocabulary(steps_by_process={"Hiring": ["Onsite interview"]},
+                           loose=["Acknowledged"])
+    batch = [{"id": "r1", "text": "..."}, {"id": "r2", "text": "..."}]
+    got = _clean_readings({
+        "r1": {"step": "Onsite interview", "span": "x"},     # no process — refused
+        "r2": {"step": "Acknowledged", "span": "thanks"},    # loose — allowed
+    }, batch, vocab)
+    assert set(got) == {"r2"}
+
+
+def test_the_vocabulary_flattens_for_the_audit_table():
+    """`activities` is every step once, so the abstention table and the
+    'anything to classify into' check keep working unchanged."""
+    from induction.abstraction import ReadVocabulary
+
+    v = ReadVocabulary(steps_by_process={"A": ["one", "two"], "B": ["two", "three"]},
+                       loose=["four"])
+    assert v.activities == ["one", "two", "three", "four"]
+    assert v.processes == ["A", "B"]
+    assert v.steps_for("A") == ["one", "two", "four"]
+    assert v.steps_for(None) == ["four"]
+
+
+def test_a_bare_list_is_still_a_vocabulary_with_no_processes():
+    from induction.abstraction import ReadVocabulary
+    v = ReadVocabulary.of(["Requested", "Approved"])
+    assert v.processes == [] and v.activities == ["Requested", "Approved"]
