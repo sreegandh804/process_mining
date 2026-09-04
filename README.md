@@ -92,6 +92,8 @@ steps read from the records rather than from the transport verb:
 export ANTHROPIC_API_KEY=sk-ant-...
 
 python3 run_email.py --path samples/enron
+
+wslview out/inspector.html
 ```
 
 That is ~14 model calls for the reading and naming, plus up to 200 short calls
