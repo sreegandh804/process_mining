@@ -125,7 +125,11 @@ class AnthropicJudge(SemanticJudge):
             msg = with_backoff(
                 lambda: self._client.messages.create(
                     model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-haiku-4-5"),
-                    max_tokens=200,
+                    # One short JSON verdict — but thinking tokens count against
+                    # this too, and at 200 a thinking model never reaches the
+                    # JSON at all: every pair silently reads as 'not the same
+                    # work'. See abstraction.py's note on the caps.
+                    max_tokens=4000,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
                                f"Record A:\n{a_text[:1500]}\n\nRecord B:\n{b_text[:1500]}\n\n"

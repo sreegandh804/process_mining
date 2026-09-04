@@ -108,7 +108,7 @@ class AnthropicActivityMapper(ActivityMapper):
             msg = with_backoff(
                 lambda: api.messages.create(
                     model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
-                    max_tokens=1200,
+                    max_tokens=_MAP_TOKENS,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
                                "Vocabulary:\n" + json.dumps(vocab, indent=2) +
@@ -206,6 +206,24 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
 # loses 25 readings rather than all of them.
 _DISCOVERY_SAMPLE = 150
 _CLASSIFY_BATCH = 25
+
+# Why these caps are far above the JSON they have to fit.
+#
+# `max_tokens` is a CEILING, not a spend — an unused token costs nothing — but a
+# reply that hits it is truncated mid-JSON, and truncated JSON is an empty dict
+# two frames later. Current models think before they answer, adaptively and by
+# default, and **thinking tokens count against this ceiling**. So a budget sized
+# to the answer ("4-8 short names, call it 1500") is a budget the answer never
+# reaches: on samples/enron the discovery pass spent its whole 1500 thinking and
+# emitted nothing, and the run reported "returned 0 activities" for two days
+# before the truncation was visible at all.
+#
+# Size these to the answer PLUS room to think, and let `_call` say so when a
+# reply is cut off anyway. The alternative — turning thinking down per model —
+# would need this layer to know which model it is talking to, and it does not.
+_DISCOVER_TOKENS = 8000
+_MAP_TOKENS = 8000
+_CLASSIFY_TOKENS = 16000
 
 
 @dataclass
@@ -763,7 +781,7 @@ class AnthropicRecordClassifier(RecordClassifier):
         got, raw = self._call(
             self._DISCOVER_SYSTEM,
             "Records:\n" + json.dumps([s[:400] for s in samples], indent=1),
-            max_tokens=1500)
+            max_tokens=_DISCOVER_TOKENS)
         acts = _first_named(got, self._ACTIVITY_KEYS)
         procs = _first_named(got, self._PROCESS_KEYS)
         if not acts:
@@ -783,7 +801,7 @@ class AnthropicRecordClassifier(RecordClassifier):
             ask
             + "\n\nRecords:\n" + json.dumps(records, indent=1)
             + "\n\nReturn the JSON. Omit any record you are not sure about.",
-            max_tokens=4000)
+            max_tokens=_CLASSIFY_TOKENS)
         return got if isinstance(got, dict) else {}
 
 

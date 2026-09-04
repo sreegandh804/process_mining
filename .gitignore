@@ -19,3 +19,4 @@ venv/
 # Secrets — never commit
 .env
 .env.*
+/out-live/
