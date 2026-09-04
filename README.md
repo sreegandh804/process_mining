@@ -5,6 +5,7 @@ email — into a **believable, traceable process model**: the common path, the
 variants, the exceptions, and the steps no system recorded. **Every claim points
 back to its evidence and carries a confidence tier.** Inference is shown as
 inference, never as fact.
+<img width="1080" height="1171" alt="image" src="https://github.com/user-attachments/assets/878fc673-9c9d-48b4-a654-a2203c2b1f99" />
 
 ## The idea in one paragraph
 
