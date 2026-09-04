@@ -75,7 +75,9 @@ def infer_names(model, enable: bool = False, api_model: str | None = None, namer
         msg = with_backoff(
             lambda: api.messages.create(
                 model=api_model or os.environ.get("INDUCTION_NAMING_MODEL", "claude-opus-5"),
-                max_tokens=1500,
+                # Room for the answer PLUS the model's thinking, which counts
+                # against this ceiling — see abstraction.py's note on the caps.
+                max_tokens=8000,
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": _prompt(payload)}],
             ),

@@ -15,3 +15,8 @@ venv/
 # Editor / OS
 .DS_Store
 *.swp
+
+# Secrets — never commit
+.env
+.env.*
+/out-live/

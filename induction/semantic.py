@@ -95,7 +95,10 @@ class AnthropicJudge(SemanticJudge):
         "You decide whether two records from a company's systems are the SAME piece "
         "of work — the same task, incident, or change — not merely the same topic. "
         "Two invoices to one customer are not the same work. A bug report and the pull "
-        "request that fixes it ARE. Judge only the two records shown; do not invent "
+        "request that fixes it ARE. Two threads about the same counterparty, weeks "
+        "apart, with different people on them, are two runs of work about one "
+        "subject — NOT the same work. Each record is headed by WHEN it happened and "
+        "WHO was on it: use both. Judge only the two records shown; do not invent "
         "facts about either. Answer ONLY compact JSON: "
         '{"same": true|false, "reason": "<one short clause>"}.'
     )
@@ -124,8 +127,12 @@ class AnthropicJudge(SemanticJudge):
         try:
             msg = with_backoff(
                 lambda: self._client.messages.create(
-                    model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-opus-5"),
-                    max_tokens=200,
+                    model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-haiku-4-5"),
+                    # One short JSON verdict — but thinking tokens count against
+                    # this too, and at 200 a thinking model never reaches the
+                    # JSON at all: every pair silently reads as 'not the same
+                    # work'. See abstraction.py's note on the caps.
+                    max_tokens=4000,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
                                f"Record A:\n{a_text[:1500]}\n\nRecord B:\n{b_text[:1500]}\n\n"

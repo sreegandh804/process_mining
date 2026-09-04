@@ -24,6 +24,16 @@ what they are *about*, using the rarity-weighted token overlap already built for
 the fuzzy pass. It declines unless the vocabulary genuinely separates the
 cluster, so a source whose structure did the work is untouched.
 
+Token overlap is the *weakest* form of "what it is about", and on a real mailbox
+it shows: refining 57 Enron threads produced kinds called `shirley, shall, time`
+and `hey, ena, work`. Shared vocabulary is not shared subject matter. So where
+`abstraction.py`'s reading tier has actually READ each record and placed it in
+one of the process families it derived from the corpus, those readings are
+passed in as `case_process` and they take precedence over the token fallback.
+The engine still draws every boundary — it counts each run's records and places
+the run by majority (`_reproject`) — the model only ever supplied the names.
+Such a boundary is tier `model`, and says so.
+
 Embeddings would *propose* finer boundaries still — the documented upgrade path,
 deliberately not built (similar text != same process, which is why a
 topic-refined boundary stays `heuristic` and names the words that made it).
@@ -35,6 +45,7 @@ from collections import Counter, defaultdict
 
 from induction.adapters import Shaped
 from induction.model import heuristic
+from induction.model import model as model_tier
 from induction.process import ProcessKind
 from induction.profiles import GENERIC_PROFILE, Profile
 # `_text_of` and the pooling cap are shared with the correlator on purpose: the
@@ -47,7 +58,16 @@ from induction.steps.variants import induced_variants
 
 
 def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFILE,
-            topics: TopicPolicy = DEFAULT_TOPIC_POLICY) -> list[ProcessKind]:
+            topics: TopicPolicy = DEFAULT_TOPIC_POLICY,
+            case_process: dict | None = None) -> list[ProcessKind]:
+    """Cluster runs into kinds.
+
+    `case_process` — ``{case_id: "Contract execution"}`` — is the reading tier's
+    answer to "what is this run about", available only after `abstraction.py` has
+    read the records. When present it replaces the token-overlap fallback for the
+    runs it covers: a run it does not name stays in its structural cluster rather
+    than being forced into a family nothing evidenced.
+    """
     entities_by_id = {e.id: e for e in shaped.entities}
     is_bot = {e.id: e.attrs.get("is_bot", False) for e in shaped.entities if e.type == "person"}
     events_by_id = {e.id: e for e in shaped.events}
@@ -72,8 +92,17 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
         generic_key = (automated, case.kind_hint)
         clusters[profile.cluster_key(generic_key, cf)].append(case.id)
 
-    # --- refine a large, undifferentiated cluster by what its runs are about ---
-    clusters, topic_terms = _refine_by_topic(clusters, corr, entities_by_id, topics)
+    # --- refine by what each run is ABOUT ---
+    # The reading tier wins where it has an answer: it read the records, and the
+    # token fallback only counted their words. Where it has none, the fallback
+    # gets its usual (deliberately reluctant) turn.
+    read_terms: dict[tuple, str] = {}
+    if case_process:
+        clusters, read_terms = _split_by_read_process(clusters, case_process,
+                                                      cases=corr.cases)
+        topic_terms: dict[tuple, tuple[str, ...]] = {}
+    else:
+        clusters, topic_terms = _refine_by_topic(clusters, corr, entities_by_id, topics)
 
     # --- assemble a ProcessKind per cluster, biggest first (loudest reads first) ---
     kinds: list[ProcessKind] = []
@@ -84,6 +113,10 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
         terms = topic_terms.get(key, ())
         if terms:
             kf["topic_terms"] = list(terms)
+        read_process = read_terms.get(key)
+        if read_process:
+            kf["read_process"] = read_process
+            kf["project"] = ("project", read_process) in key
 
         # A profile names a kind from its features, so two topic-refined
         # siblings can claim the same name. Keep the profile's word and make the
@@ -101,11 +134,28 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
             why = (f"kind boundary inferred by structural clustering, then grouped by "
                    f"shared vocabulary ({', '.join(terms)}); not read")
 
+        if read_process and kf.get("project"):
+            display = read_process
+            pk_confidence = model_tier(
+                f"a project, not a process: {len(case_ids)} run(s) of {read_process} "
+                f"with a real multi-step arc, but nothing that recurs — it happened, "
+                f"it had stages, it is not how work is usually done here")
+        elif read_process:
+            # A boundary drawn from records the model actually read. The name is
+            # the family it named; the tier is `model`, because that is the claim.
+            display = read_process
+            pk_confidence = model_tier(
+                f"grouped by what each run is about, read from its records "
+                f"({read_process}); the boundary is a count over those readings, "
+                f"not a label a model put on the run")
+        else:
+            pk_confidence = heuristic(why)
+
         variants, dfg = induced_variants(case_ids, corr.cases)
         steps_seen = sorted({a for v in variants for a in v.signature})
         pk = ProcessKind(
             id=kid, name=display, rationale=rationale,
-            confidence=heuristic(why),
+            confidence=pk_confidence,
             case_ids=case_ids, variants=variants, dfg=dfg, steps=steps_seen,
         )
         pk.features = kf
@@ -125,6 +175,67 @@ def _case_text(case, entities_by_id) -> str:
             seen.add(text)
             parts.append(text)
     return " ".join(parts)[:_MAX_POOLED_TEXT]
+
+
+# A one-off needs this many distinct read steps to count as a project rather than
+# noise. Three: a request and its answer is correspondence; a request, a review
+# and a decision is an arc.
+_PROJECT_MIN_STEPS = 3
+
+
+def _split_by_read_process(clusters: dict, case_process: dict,
+                           policy: TopicPolicy = DEFAULT_TOPIC_POLICY,
+                           cases: dict | None = None):
+    """Split each structural cluster by the process its runs were READ into.
+
+    Two refusals, both taken from `_refine_by_topic` — not because a mailbox
+    needs them, but because the question ("is this group big enough to be a
+    kind?") is the same question whatever read the group, and two paths answering
+    it with different numbers is how a corpus starts getting special-cased:
+
+      - a run the reading did not place stays in its parent cluster; an
+        unexplained run is not a one-run process, and
+      - a family below `max(min_topic_cases, len * min_topic_share)` is folded
+        back into the parent. **Both** terms matter, and using only the floor was
+        a bug: `topics.py` puts the reason plainly — 3 out of 40 is a topic,
+        3 out of 509 is a splinter. A flat floor is tuned to whatever corpus was
+        in front of you when you picked it, which is exactly the overfitting this
+        engine is supposed to refuse. The share makes it scale-free.
+    """
+    out: dict[tuple, list[str]] = {}
+    terms_by_key: dict[tuple, str] = {}
+    for key, case_ids in clusters.items():
+        floor = max(policy.min_topic_cases,
+                    round(len(case_ids) * policy.min_topic_share))
+        by_process: dict[str, list[str]] = defaultdict(list)
+        unplaced: list[str] = []
+        for cid in case_ids:
+            proc = case_process.get(cid)
+            (by_process[proc] if proc else unplaced).append(cid)
+        for proc, ids in sorted(by_process.items()):
+            if len(ids) >= floor:
+                sub_key = key + (("process", proc),)
+                out.setdefault(sub_key, []).extend(ids)
+                terms_by_key[sub_key] = proc
+                continue
+            # Below the floor it is not a PROCESS — nothing recurs. But it may be a
+            # PROJECT: one run (or two) with a real multi-step arc. Upgrading the
+            # office chairs is contact the seller -> negotiate -> proposal reviewed
+            # -> paid -> delivered, once. That is work with structure, and binning
+            # it with "Congratulations" and forwarded MIME blobs is a lie of
+            # omission. Repetition makes a process; structure without repetition
+            # is a project; neither is noise.
+            if cases is not None and any(
+                    len(set(cases[cid].trace_signature)) >= _PROJECT_MIN_STEPS
+                    for cid in ids if cid in cases):
+                sub_key = key + (("project", proc),)
+                out.setdefault(sub_key, []).extend(ids)
+                terms_by_key[sub_key] = proc
+                continue
+            unplaced.extend(ids)              # no repetition, no arc: not a thing
+        if unplaced:
+            out.setdefault(key, []).extend(unplaced)
+    return out, terms_by_key
 
 
 def _refine_by_topic(clusters: dict, corr, entities_by_id, policy: TopicPolicy):
@@ -196,6 +307,10 @@ def _merge(dst: dict, cf: dict) -> None:
 
 def _data_derived_rationale(kf: dict) -> str:
     acts = ", ".join(kf["dominant_actions"]) or "—"
+    if kf.get("read_process"):
+        return (f"{kf['n_cases']} runs whose records were read as {kf['read_process']}. "
+                f"Steps seen: {acts}. The boundary is a majority count over each run's "
+                f"own records — the model named the family, it did not draw the line.")
     types = ", ".join(sorted(kf["entity_types"])) or "—"
     topic = ""
     if kf.get("topic_terms"):

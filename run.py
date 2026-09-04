@@ -79,10 +79,13 @@ def main(argv: list[str] | None = None) -> int:
 
     from induction.abstraction import infer_activities
     from induction.naming import infer_names
-    names = infer_names(m, enable=tier.names_enable(), log=prog)
+    # Abstraction runs BEFORE naming: reading the records can re-segment the
+    # corpus (`abstraction._reproject`), and a namer that ran first would hand
+    # back names keyed on kind ids that no longer mean the same thing.
     # The verb map groups git's own verbs into activities; the record reader is
     # gated on records-per-activity and simply won't fire on a git corpus.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
     html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)

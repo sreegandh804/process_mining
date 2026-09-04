@@ -76,14 +76,17 @@ class AnthropicActivityMapper(ActivityMapper):
         "example text. Group the pairs that are the SAME real activity — across "
         "artefact types and systems (an issue 'opened' and an email 'sent' reporting "
         "a bug are both 'Raised'; a pull request 'merged' and an issue 'closed' are "
-        "'Shipped') — and give each group a short human activity name. You may NAME "
-        "and GROUP only: do not invent an activity no pair evidences.\n"
-        "NEVER return a name that just restates how the record travelled — "
-        "'Correspondence Sent', 'Email Forwarded', 'Message Posted' are the verb in "
-        "more words and say nothing about the work. If a verb genuinely carries no "
-        "activity (a mailbox records only that something was sent), map it to the "
-        "single plainest word you can and STOP; a later pass reads the record "
-        "itself. Padding the verb hides from that pass that it is needed.\n"
+        "'Shipped' — these illustrate the SHAPE of the grouping, not a vocabulary to "
+        "reuse) — and give each group a short human activity name drawn from this "
+        "corpus's own subject matter. You may NAME and GROUP only: do not invent an "
+        "activity no pair evidences.\n"
+        "NEVER return a name that just restates how the record travelled or was "
+        "filed — 'Correspondence Sent', 'Email Forwarded', 'Message Posted' are the "
+        "verb in more words and say nothing about the work. If a verb genuinely "
+        "carries no activity (a system that records only that something was sent, "
+        "posted or uploaded), map it to the single plainest word you can and STOP; a "
+        "later pass reads the record itself. Padding the verb hides from that pass "
+        "that it is needed.\n"
         'Return ONLY JSON: {"map": {"<artefact>/<verb>": "<Activity Name>"}} '
         "covering every pair."
     )
@@ -105,7 +108,7 @@ class AnthropicActivityMapper(ActivityMapper):
             msg = with_backoff(
                 lambda: api.messages.create(
                     model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
-                    max_tokens=1200,
+                    max_tokens=_MAP_TOKENS,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
                                "Vocabulary:\n" + json.dumps(vocab, indent=2) +
@@ -171,8 +174,25 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
 # So: read the record instead — but only where the verbs demonstrably said
 # nothing, which is a property of the vocabulary and never of the word "email".
 #
+# The reading answers TWO questions per record, because the transport verb was
+# hiding two things, not one:
+#
+#   what the record DOES     -> Requested, Reviewed, Approved   -> the STEPS
+#   what the record is ABOUT -> Contract execution, Invoice dispute -> the KINDS
+#
+# The second half exists because the steps were only half the failure. Kinds are
+# clustered on `(automated, case.kind_hint)`, which for a mailbox is
+# `(False, 'email')` for every run in the corpus — one kind, always — with token
+# overlap over pooled thread text as the only fallback. On the repo's own Enron
+# sample that fallback named its kinds `shirley, shall, time` and `hey, ena,
+# work`. Perfect steps inside one process called "Correspondence Sharing" is not
+# a process model either, so `_reproject` re-runs segmentation over what was read.
+#
 # The division of labour is the point, and it is what keeps this honest:
 #   the model  LABELS a record that exists, and quotes the text it read;
+#   the engine PLACES each run, by counting its own records' labels
+#              (`_process_of_case`) — no model is ever asked "what process is
+#              this thread?", because answering that is drawing a boundary;
 #   the engine FINDS what is absent, deterministically, by comparing a run
 #              against its kind's common path (steps/gaps_generic.py).
 # The model never invents a missing step. It cannot: it only ever assigns a name
@@ -186,6 +206,33 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
 # loses 25 readings rather than all of them.
 _DISCOVERY_SAMPLE = 150
 _CLASSIFY_BATCH = 25
+
+# Why these caps are far above the JSON they have to fit.
+#
+# `max_tokens` is a CEILING, not a spend — an unused token costs nothing — but a
+# reply that hits it is truncated mid-JSON, and truncated JSON is an empty dict
+# two frames later. Current models think before they answer, adaptively and by
+# default, and **thinking tokens count against this ceiling**. So a budget sized
+# to the answer ("4-8 short names, call it 1500") is a budget the answer never
+# reaches: on samples/enron the discovery pass spent its whole 1500 thinking and
+# emitted nothing, and the run reported "returned 0 activities" for two days
+# before the truncation was visible at all.
+#
+# Size these to the answer PLUS room to think, and let `_call` say so when a
+# reply is cut off anyway. The alternative — turning thinking down per model —
+# would need this layer to know which model it is talking to, and it does not.
+# A step is a label, not a description. Process mining works from a controlled
+# activity vocabulary of short verb phrases; a 13-word "step" is a summary of one
+# record, matches nothing else, and cannot be compared across runs. The live
+# Enron run produced "Pre-petition and post-petition exposure worksheets built
+# from allocation and imbalance reports" as a step — and 56% abstention, because
+# nothing else in the corpus could be that step. Longer labels are dropped and
+# said so, rather than let through to fragment every variant.
+_MAX_LABEL_WORDS = 5
+
+_DISCOVER_TOKENS = 8000
+_MAP_TOKENS = 8000
+_CLASSIFY_TOKENS = 16000
 
 
 @dataclass
@@ -204,6 +251,14 @@ class Abstraction:
     by_record: dict[str, dict] = field(default_factory=dict)
     vocabulary: list[dict] = field(default_factory=list)
     n_unclassified: int = 0
+    # The process families the reading proposed, and where each run landed.
+    # `by_case` is filled by `_reproject` — a run's process is a COUNT over its
+    # records' readings, never a label a model attached to the run itself.
+    processes: list[str] = field(default_factory=list)
+    # process name -> its steps, IN THE ORDER DISCOVERY GAVE THEM. The definition
+    # of the process, as distinct from what any particular run did.
+    steps_by_process: dict[str, list[str]] = field(default_factory=dict)
+    by_case: dict[str, str] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
         return bool(self.by_vocab or self.by_record)
@@ -220,6 +275,10 @@ class Abstraction:
         rec = self.by_record.get(event_id)
         return rec.get("span") if rec else None
 
+    def process_of(self, event_id: str) -> Optional[str]:
+        rec = self.by_record.get(event_id)
+        return rec.get("process") if rec else None
+
     @classmethod
     def of(cls, value) -> "Abstraction":
         """Accept a bare ``{artefact/verb: Activity}`` dict as a tier-1-only
@@ -229,21 +288,109 @@ class Abstraction:
         return cls(by_vocab=dict(value or {}))
 
 
-class RecordClassifier:
-    """Reads what a single record *does*, when its verb does not say.
+@dataclass
+class ReadVocabulary:
+    """What the discovery pass proposed, derived from a sample of the corpus.
 
-    Two passes, both batched: `discover` proposes the activity vocabulary from a
-    sample of the corpus itself (never a taxonomy this engine hardcodes), and
-    `classify` assigns each record one of those activities plus the span it read.
+    **Processes first, then the steps each process is made of.** A mailbox
+    records `sent`, and that single word conceals both what a message is *about*
+    and what it *does* — so the reading recovers both, in that order:
+
+      - the PROCESSES: contract termination, invoice settlement, campus
+        recruiting. These become the process KINDS.
+      - and, under each, the STEPS that process passes through.
+
+    **Steps are process-specific, and this was learned the hard way.** An earlier
+    version asked for one flat step vocabulary reusable in EVERY process, on the
+    theory that shared stages make processes comparable. The only words that fit
+    contract termination *and* research collaboration are `Requested`, `Reviewed`,
+    `Approved` — lifecycle states that describe the shape of any correspondence
+    and the substance of no process. A reader learns nothing from
+    `Requested -> Approved`.
+
+    A process's steps are its own. Hiring is `CV screened -> Phone screen ->
+    Onsite -> Offer made`; not one of those belongs in invoice settlement, and
+    that is correct rather than a failure to generalise. The thing a step must
+    recur across is the RUNS OF ITS OWN PROCESS — which is exactly what makes a
+    common path, a variant and a skipped step mean something, all of which are
+    computed within a kind and never across kinds.
+
+    Before any of this, kinds were clustered on `(automated, case.kind_hint)` —
+    which for mail is `(False, 'email')` for every case in the corpus, i.e.
+    exactly one kind, always. The fallback was token overlap over pooled thread
+    text, and on a real mailbox it produced kinds called `shirley, shall, time`
+    and `hey, ena, work`. Vocabulary is not subject matter, and a reader cannot
+    act on either of those.
+
+    The guardrail is unchanged, and is the reason this is a *closed list proposed
+    once* rather than a free-text label per record: the model NAMES the families
+    and their steps, the engine ASSIGNS runs to them by counting
+    (`_process_of_case`) and draws every boundary itself. A model that could
+    invent a label per record would be partitioning the corpus, which is
+    structural work and not its lane.
+    """
+
+    # process name -> the steps THAT process is made of. Nested, not two flat
+    # lists, because a step belongs to a process and to nothing else.
+    steps_by_process: dict[str, list[str]] = field(default_factory=dict)
+    # Steps not claimed by any process (a corpus can perform work it has no
+    # family for). Kept so a reading is never lost for want of a home.
+    loose: list[str] = field(default_factory=list)
+
+    @property
+    def processes(self) -> list[str]:
+        return list(self.steps_by_process)
+
+    @property
+    def activities(self) -> list[str]:
+        """Every step, once, for the audit table and the "is there anything to
+        classify into" check. Order follows the processes."""
+        out: list[str] = []
+        for steps in list(self.steps_by_process.values()) + [self.loose]:
+            for st in steps:
+                if st not in out:
+                    out.append(st)
+        return out
+
+    def steps_for(self, process: Optional[str]) -> list[str]:
+        """What a record in `process` is allowed to be. A record with no process
+        may only take a loose step — never one belonging to a family it was not
+        placed in."""
+        if process and process in self.steps_by_process:
+            return self.steps_by_process[process] + self.loose
+        return self.loose
+
+    def __bool__(self) -> bool:
+        return bool(self.activities)
+
+    @classmethod
+    def of(cls, value) -> "ReadVocabulary":
+        """Accept a bare ``["Requested", ...]`` as a vocabulary with no process
+        structure, the same courtesy `Abstraction.of` extends to a bare verb map."""
+        if isinstance(value, cls):
+            return value
+        return cls(loose=list(value or []))
+
+
+class RecordClassifier:
+    """Reads what a single record *does* and is *about*, when its verb says neither.
+
+    Two passes, both batched: `discover` proposes the vocabulary from a sample of
+    the corpus itself (never a taxonomy this engine hardcodes), and `classify`
+    assigns each record an activity, a process, and the span it read them from.
     Injected, exactly like `ActivityMapper`, so the layer is testable offline.
     """
 
-    def discover(self, samples: list[str]) -> list[str]:
+    def discover(self, samples: list[str]) -> ReadVocabulary:
         raise NotImplementedError
 
-    def classify(self, records: list[dict], vocabulary: list[str]) -> dict[str, dict]:
-        """``[{"id","text"}]`` -> ``{id: {"activity","span"}}``. A record the
-        classifier will not commit to must be OMITTED, not guessed at."""
+    def classify(self, records: list[dict], vocabulary: ReadVocabulary) -> dict[str, dict]:
+        """``[{"id","text"}]`` -> ``{id: {"activity","process","span"}}``.
+
+        A record the classifier will not commit to must be OMITTED, not guessed
+        at. `process` may be omitted on its own — a record can plainly perform an
+        activity while belonging to no family the sample named.
+        """
         raise NotImplementedError
 
 
@@ -268,6 +415,59 @@ def _parse_map(text: str) -> dict:
     return inner if isinstance(inner, dict) else {}
 
 
+def _first_named(obj, keys) -> list[str]:
+    """Names under the first of `keys` the model actually used, else []."""
+    if not isinstance(obj, dict):
+        return []
+    for key in keys:
+        if key in obj:
+            names = _names_from(obj[key])
+            if names:
+                return names
+    return []
+
+
+def _names_from(value) -> list[str]:
+    """Pull a list of names out of whatever shape the model answered in.
+
+    The prompt asks for ``{"activities": ["Requested", ...]}`` and the guardrail
+    used to accept only that — a list of bare strings. Every other shape a model
+    reasonably reaches for parsed fine and was then filtered to nothing:
+
+        {"activities": [{"name": "Requested", "evidence": "..."}]}
+        {"Requested": "a party asks for something", "Approved": "..."}
+
+    That is how a run reported "returned 0 activities" while the model had
+    answered perfectly well. Read the name out of each shape instead. The
+    guardrail does not move: the result is still only ever names, and
+    `_clean_readings` still refuses any activity that is not on this list.
+    """
+    def one(item) -> Optional[str]:
+        if isinstance(item, str):
+            return item.strip() or None
+        if isinstance(item, dict):
+            for k in ("name", "activity", "label", "title", "process", "step"):
+                v = item.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return None
+
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [n for n in (one(i) for i in value) if n]
+    if isinstance(value, dict):
+        # a name -> description map is a list of names wearing a different hat
+        if value and all(isinstance(v, str) for v in value.values()):
+            return [k.strip() for k in map(str, value) if k.strip()]
+        for v in value.values():
+            if isinstance(v, (list, dict)):
+                names = _names_from(v)
+                if names:
+                    return names
+    return []
+
+
 # When a kind's records outnumber its distinct activities by this much, the verbs
 # are not marking stages — they are marking transmissions. Measured, not guessed;
 # these are median records-per-activity over the corpora in the repo:
@@ -288,10 +488,40 @@ _MIN_RUNS_TO_JUDGE = 10
 def _events_needing_a_reading(m, by_vocab: dict, types: dict) -> list:
     """The gate. Events in kinds whose verbs turned out to be transport.
 
-    Two ways a kind qualifies, both read off the data:
+    Three ways a kind qualifies, all read off the data:
       - its runs draw on ONE activity — the verb map collapsed it, or the source
         only ever records one verb; or
-      - its records outnumber its distinct activities (see `_TRANSPORT_RATIO`).
+      - its records outnumber its distinct activities (see `_TRANSPORT_RATIO`); or
+      - the CORPUS as a whole clears that bar, even if this kind is too small to
+        answer for itself.
+
+    That third test is not a loosening, it is a correction. Kinds are formed
+    before anything has been read, and on a mailbox they come from token overlap
+    over pooled thread text — so a corpus whose verbs are plainly transport can be
+    diced into kinds that each fall below `_MIN_RUNS_TO_JUDGE` and never get read
+    at all. On a synthetic two-family mailbox that is exactly what happened: the
+    contract kind had a median ratio of 2.0 and was skipped for having 8 runs
+    rather than 10, and the reading that would have replaced those token-noise
+    boundaries never ran. The weak fallback was vetoing its own replacement.
+
+    Whether a source records transport or stages is a property of ITS VERBS, not
+    of any one clustering of its runs, so it is fair — and more honest — to ask
+    the question of the whole corpus too. It stays a measurement either way.
+    Corpus-wide medians over every corpus in the repo, which is what this branch
+    turns on:
+
+        samples/finance   1.00 (13 runs)     pallets/flask   1.33 (312 runs)
+        samples/grants    1.00 (20 runs)     pallets/click   1.50 (372 runs)
+        unifyai/ivy       1.50 (440 runs)    samples/enron   2.00 (57 runs)
+
+    Only the mailbox reaches the bar, and it reaches it on its own verbs. Note
+    the margin, though, because it is the honest weakness here: the two busiest
+    git corpora sit at 1.50, half a step below the line, and a repo with chattier
+    commit verbs could cross it. This branch WIDENS what gets read, and it is
+    justified on six corpora — a small sample. Re-measure it when a seventh
+    arrives rather than assuming it still holds; a source that trips it wrongly
+    pays in tokens and in relabelled steps, and `n_unclassified` is where that
+    would show.
 
     A rejected kind is left alone: reading a nightly build notice more closely
     will not make it a process.
@@ -306,15 +536,23 @@ def _events_needing_a_reading(m, by_vocab: dict, types: dict) -> list:
     def events_of(case_id):
         return [events_by_id[eid] for eid in m.cases[case_id].event_ids if eid in events_by_id]
 
-    qualifying: list = []
-    for kind in m.kinds:
-        if kind.rejected:
-            continue
-        runs = [events_of(cid) for cid in kind.case_ids]
-        alphabet = {activity(ev) for evs in runs for ev in evs}
-        ratios = [len(evs) / len({activity(e) for e in evs}) for evs in runs if len(evs) >= 2]
+    def ratios_of(runs):
+        return [len(evs) / len({activity(e) for e in evs}) for evs in runs if len(evs) >= 2]
 
-        transport = len(alphabet) <= 1 or (
+    live = [k for k in m.kinds if not k.rejected]
+    runs_of = {k.id: [events_of(cid) for cid in k.case_ids] for k in live}
+
+    corpus_ratios = [r for k in live for r in ratios_of(runs_of[k.id])]
+    corpus_transport = (len(corpus_ratios) >= _MIN_RUNS_TO_JUDGE
+                        and median(corpus_ratios) >= _TRANSPORT_RATIO)
+
+    qualifying: list = []
+    for kind in live:
+        runs = runs_of[kind.id]
+        alphabet = {activity(ev) for evs in runs for ev in evs}
+        ratios = ratios_of(runs)
+
+        transport = corpus_transport or len(alphabet) <= 1 or (
             len(ratios) >= _MIN_RUNS_TO_JUDGE and median(ratios) >= _TRANSPORT_RATIO)
         if transport:
             qualifying.extend(ev for evs in runs for ev in evs)
@@ -329,6 +567,28 @@ def _record_text(ev, m) -> str:
     if ent is None:
         return ""
     return _text_of(ent, DEFAULT_POLICY.fuzzy.text_attrs)[:1200]
+
+
+def _spread(records: list, n: int) -> list:
+    """`n` records drawn evenly across the corpus, not the first `n` of it.
+
+    The discovery pass proposes the whole corpus's vocabulary from this sample,
+    so what the sample over-represents, the vocabulary over-fits. Records arrive
+    grouped — by kind, and within a kind by whatever order the adapter walked the
+    source (for a maildir, one mailbox and one folder at a time). Taking the head
+    therefore asks one corner of the corpus to name the processes for all of it:
+    on the repo's Enron sample the first 150 of 263 records are dominated by the
+    earliest folders, and the later mailboxes get no vote at all.
+
+    An even stride is the cheapest fix that has no parameters to tune and no
+    randomness to make a run irreproducible.
+    """
+    if n <= 0 or not records:
+        return []
+    if len(records) <= n:
+        return list(records)
+    step = len(records) / n
+    return [records[int(i * step)] for i in range(n)]
 
 
 def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=None) -> None:
@@ -348,26 +608,32 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
         return
 
     log(f"abstraction: verbs are transport, reading {len(records)} records "
-        f"(discovering the activity vocabulary from a sample of {min(len(records), _DISCOVERY_SAMPLE)})")
-    sample = [r["text"] for r in records[:_DISCOVERY_SAMPLE]]
+        f"(discovering the vocabulary from a sample of {min(len(records), _DISCOVERY_SAMPLE)})")
+    sample = [r["text"] for r in _spread(records, _DISCOVERY_SAMPLE)]
     try:
-        vocabulary = [v for v in classifier.discover(sample) if isinstance(v, str) and v.strip()]
+        vocab = classifier.discover(sample)
     except Exception as e:                # the tier is a convenience, never a blocker
         log(f"[abstraction] activity discovery skipped ({type(e).__name__}: {e})")
         return
-    if len(vocabulary) < 2:
+    activities = vocab.activities
+    processes = vocab.processes
+    if len(activities) < 2:
         # One activity is what the verb map already told us; claiming it again,
         # more expensively, is not an improvement. But say so — a silent return
         # here is indistinguishable from the tier never having been asked, and on
         # a real run that cost an evening of wondering which had happened.
         log(f"[abstraction] {len(records)} records needed reading, but activity "
-            f"discovery returned {len(vocabulary)} activities "
-            f"({vocabulary or 'none'}) — nothing to classify into, so the steps "
+            f"discovery returned {len(activities)} activities "
+            f"({activities or 'none'}) — nothing to classify into, so the steps "
             f"stay as the source's own verbs")
         return
     n_batches = (len(records) + _CLASSIFY_BATCH - 1) // _CLASSIFY_BATCH
-    log(f"abstraction: reading {len(records)} records into {len(vocabulary)} "
-        f"activities ({', '.join(vocabulary)}) — {n_batches} batch(es)")
+    log(f"abstraction: reading {len(records)} records into {len(processes)} processes "
+        f"and {len(activities)} steps — {n_batches} batch(es)")
+    for name in processes:
+        log(f"abstraction:   {name} — " + " → ".join(vocab.steps_by_process[name]))
+    if vocab.loose:
+        log(f"abstraction:   (belonging to no process: {', '.join(vocab.loose)})")
 
     got: dict[str, dict] = {}
     for i in range(0, len(records), _CLASSIFY_BATCH):
@@ -375,32 +641,56 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
         b = i // _CLASSIFY_BATCH + 1
         log(f"abstraction: classifying batch {b}/{n_batches} ({len(batch)} records)")
         try:
-            got.update(_clean_readings(classifier.classify(batch, vocabulary), batch, vocabulary))
+            got.update(_clean_readings(classifier.classify(batch, vocab), batch, vocab))
         except Exception as e:
             log(f"[abstraction] batch {b} skipped ({type(e).__name__}: {e})")
 
     abstraction.by_record = got
+    abstraction.processes = processes
+    abstraction.steps_by_process = dict(vocab.steps_by_process)
     abstraction.n_unclassified = len(records) - len(got)
-    abstraction.vocabulary = _audit_rows(vocabulary, got, abstraction.n_unclassified)
+    abstraction.vocabulary = _audit_rows(activities, got, abstraction.n_unclassified)
+    n_with_process = sum(1 for r in got.values() if r.get("process"))
+    log(f"abstraction: read {len(got)} of {len(records)} records "
+        f"({abstraction.n_unclassified} declined) · {n_with_process} placed in a process")
     if got:
-        _reproject(m, abstraction)
+        _reproject(m, abstraction, log)
 
 
-def _clean_readings(raw: dict, batch: list[dict], vocabulary: list[str]) -> dict[str, dict]:
+def _clean_readings(raw: dict, batch: list[dict], vocab: "ReadVocabulary") -> dict[str, dict]:
     """Guardrail, the same shape as naming.py's `_clean`: a reading may only
-    label a record we asked about, with an activity we proposed. Anything else —
-    an invented activity, an id we never sent, a missing span — is dropped, and a
-    dropped record keeps its raw verb rather than being guessed at."""
+    label a record we asked about, with a process we proposed and a step
+    belonging TO THAT PROCESS. Anything else — an invented name, an id we never
+    sent, a step borrowed from a different family, a missing span — is dropped,
+    and a dropped record keeps its raw verb rather than being guessed at.
+
+    Steps are checked against their process, not against a global list. That is
+    the whole point of nesting them: `Onsite interview` is a real step and is
+    still wrong if the record was placed in invoice settlement, and a flat check
+    would wave it through.
+    """
+    vocab = ReadVocabulary.of(vocab)
     allowed_ids = {r["id"] for r in batch}
-    allowed_acts = {v.lower(): v for v in vocabulary}
+    procs = {p.lower(): p for p in vocab.processes}
     out: dict[str, dict] = {}
     for rid, val in (raw or {}).items():
         if rid not in allowed_ids or not isinstance(val, dict):
             continue
-        act = allowed_acts.get(str(val.get("activity", "")).strip().lower())
         span = str(val.get("span", "")).strip()
-        if act and span:
-            out[rid] = {"activity": act, "span": span[:160]}
+        if not span:
+            continue
+        proc = procs.get(str(val.get("process", "")).strip().lower())
+        allowed = {a.lower(): a for a in vocab.steps_for(proc)}
+        # `activity` is the older key; accept both so a model that answers either
+        # way is read rather than silently dropped.
+        raw_step = str(val.get("step") or val.get("activity") or "").strip().lower()
+        step = allowed.get(raw_step)
+        if not step:
+            continue
+        reading = {"activity": step, "span": span[:160]}
+        if proc:
+            reading["process"] = proc
+        out[rid] = reading
     return out
 
 
@@ -428,26 +718,39 @@ def _audit_rows(vocabulary: list[str], readings: dict, n_unclassified: int) -> l
 class ScriptedRecordClassifier(RecordClassifier):
     """Offline stand-in for the reading model — tests and ``--demo``.
 
-    Rules are (activity, [phrase, ...]); the first whose phrase appears in the
-    record wins, and the phrase it matched becomes the span, exactly as the real
-    model returns the text it read. A record no rule matches is OMITTED — the
-    abstention path is the one most worth exercising offline.
+    Rules are ``(activity, [phrase, ...])`` or ``(activity, [phrase, ...],
+    process)``; the first whose phrase appears in the record wins, and the phrase
+    it matched becomes the span, exactly as the real model returns the text it
+    read. A record no rule matches is OMITTED — the abstention path is the one
+    most worth exercising offline, and so is the rule that names no process.
     """
 
-    def __init__(self, rules: list[tuple[str, list[str]]]):
-        self._rules = [(name, [p.lower() for p in phrases]) for name, phrases in rules]
+    def __init__(self, rules: list[tuple]):
+        self._rules = []
+        for rule in rules:
+            name, phrases = rule[0], rule[1]
+            process = rule[2] if len(rule) > 2 else None
+            self._rules.append((name, [p.lower() for p in phrases], process))
 
-    def discover(self, samples: list[str]) -> list[str]:
-        return [name for name, _ in self._rules]
+    def discover(self, samples: list[str]) -> ReadVocabulary:
+        by_process: dict[str, list[str]] = {}
+        loose: list[str] = []
+        for name, _, process in self._rules:
+            bucket = by_process.setdefault(process, []) if process else loose
+            if name not in bucket:
+                bucket.append(name)
+        return ReadVocabulary(steps_by_process=by_process, loose=loose)
 
-    def classify(self, records: list[dict], vocabulary: list[str]) -> dict[str, dict]:
+    def classify(self, records: list[dict], vocabulary: "ReadVocabulary") -> dict[str, dict]:
         out = {}
         for rec in records:
             low = rec["text"].lower()
-            for name, phrases in self._rules:
+            for name, phrases, process in self._rules:
                 hit = next((p for p in phrases if p in low), None)
                 if hit:
                     out[rec["id"]] = {"activity": name, "span": hit}
+                    if process:
+                        out[rec["id"]]["process"] = process
                     break
         return out
 
@@ -461,37 +764,80 @@ class AnthropicRecordClassifier(RecordClassifier):
     """
 
     _DISCOVER_SYSTEM = (
-        "You are given a sample of raw records from ONE company system (emails, chat "
-        "messages, notes). Each records that something happened, but the system's own "
-        "verb ('sent') says nothing about WHAT. Read the sample and return the short "
-        "list of distinct ACTIVITIES these records actually perform — the kind of thing "
-        "a process analyst would call a step (e.g. Requested, Reviewed, Approved, "
-        "Escalated, Confirmed, Informed). Derive them from THIS sample only; do not "
-        "return a generic taxonomy, and do not return an activity the sample does not "
-        "show. Prefer 4-8 activities.\n"
-        "NEVER return an activity that merely restates how the record travelled — "
-        "'Corresponded by Email', 'Relayed to Others', 'Sent a Message', 'Forwarded' "
-        "are the system's verb in more words, and naming them defeats the point of "
-        "reading the text at all. Every activity must say what the WORK was. If a "
-        "record only passes something along, that is for the classifier to decline, "
-        "not for you to name.\n"
-        'Return ONLY JSON: {"activities": ["<Name>", ...]}'
+        "You are given a sample of raw records from ONE system of record. Each "
+        "records that something happened, but the system's own verb for it (such as "
+        "'sent', 'posted', 'uploaded', 'logged') describes only how the record was "
+        "filed, not WHAT was done. Read the sample and recover the process model "
+        "behind it, from THIS sample only.\n"
+        "\n"
+        "FIRST the PROCESSES: the recurring families of work this corpus is a record "
+        "of. Prefer 3-8. A process RECURS across many records — it is never one "
+        "specific case, deal, person or counterparty.\n"
+        "\n"
+        "THEN, under each process, ITS OWN STEPS: the stages that process passes "
+        "through, in the order they happen. Prefer 3-6 per process.\n"
+        "\n"
+        "STEPS BELONG TO THEIR PROCESS. Do not look for one vocabulary that fits "
+        "every process — hiring is 'CV screened, Phone screen, Onsite interview, "
+        "Offer made' and not one of those belongs in invoice settlement. Naming "
+        "steps so generically that they fit everywhere ('Requested', 'Reviewed', "
+        "'Approved', 'Updated') describes the shape of correspondence and the "
+        "substance of no process; a reader learns nothing from 'Requested -> "
+        "Approved'. Name each step in the concrete language of ITS process.\n"
+        "\n"
+        "THE ONE TEST A STEP MUST PASS: it recurs across MULTIPLE RUNS of its own "
+        "process. As specific as the work actually is, but a stage several runs pass "
+        "through — not a one-off task you saw in a single record.\n"
+        "\n"
+        "A STEP IS A LABEL, NOT A DESCRIPTION: 2 to 4 words, a verb phrase. 'Counsel "
+        "engaged', 'Invoice issued', 'Onsite interview', 'Termination validated'. If "
+        "it takes a sentence to say what the step is, it is not one step — split it "
+        "or generalise it. Labels longer than five words will be discarded.\n"
+        "\n"
+        "The domain is whatever the sample says it is — engineering, clinical, "
+        "logistics, legal, manufacturing, support. Take every name from the sample's "
+        "own subject matter and vocabulary; do not reach for the language of office "
+        "administration, or any other domain, unless the records are about it, and do "
+        "not return a generic taxonomy.\n"
+        "\n"
+        "NEVER return a name that merely restates how a record travelled or was "
+        "filed. 'Sent', 'Forwarded', 'Posted', 'Correspondence Sharing' are the "
+        "system's own verb in more words: they say a message moved, not that anything "
+        "was accomplished. A step says what the record ACHIEVED. Do not return a name "
+        "the sample does not show. If a record only passes something along, that is "
+        "for the classifier to decline, not for you to name.\n"
+        'Return ONLY JSON: {"processes": [{"name": "<Process>", '
+        '"steps": ["<Step>", ...]}, ...]}'
     )
     _CLASSIFY_SYSTEM = (
-        "You assign each record exactly one ACTIVITY from the list given, and quote the "
-        "span of the record's own text that justifies it. If a record does not clearly "
-        "perform any activity on the list, OMIT it entirely — omission is correct and "
-        "expected; a guess is not. Never invent an activity outside the list. Return "
-        'ONLY JSON: {"<record id>": {"activity": "<Name>", "span": "<quoted text>"}}'
+        "You are given process definitions — each process with its own steps — and a "
+        "batch of records. For each record decide, in this order:\n"
+        "  1. which PROCESS it belongs to, if any;\n"
+        "  2. which of THAT PROCESS'S steps it performs;\n"
+        "  3. the span of the record's own text that justifies the step.\n"
+        "A step may only come from the steps listed under the process you chose. "
+        "Never mix a step from one process into another, and never invent one.\n"
+        "If a record belongs to no process on the list, or performs none of that "
+        "process's steps, OMIT the record entirely. Omission is correct and expected; "
+        "a guess is not. Return ONLY JSON: "
+        '{"<record id>": {"process": "<Process>", "step": "<Step>", '
+        '"span": "<quoted text>"}}'
     )
 
     def __init__(self, api_model: Optional[str] = None, log=None):
         self.api_model = api_model
         self._log = log or (lambda m: None)
 
-    def _call(self, system: str, content: str, max_tokens: int) -> dict:
+    def _call(self, system: str, content: str, max_tokens: int) -> tuple:
+        """Returns ``(parsed, raw_text)``.
+
+        The raw text comes back too so a caller left holding nothing can SAY what
+        it was handed. A silent empty parse cost a run once: the log read
+        "activity discovery returned 0 activities" with no sight of the reply,
+        which is a symptom, not a diagnosis.
+        """
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            return {}
+            return {}, ""
         from induction.anthropic_call import client, with_backoff
         api = client()
         msg = with_backoff(
@@ -502,34 +848,152 @@ class AnthropicRecordClassifier(RecordClassifier):
             ),
             label="activity reading", log=self._log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-        return _parse_map(text)
+        if getattr(msg, "stop_reason", None) == "max_tokens":
+            # A truncated reply is unparseable JSON, and unparseable JSON is an
+            # empty dict two frames later. Say it here, where the cause is known.
+            self._log(f"[abstraction] the reply hit its {max_tokens}-token cap and was "
+                      f"cut off mid-JSON — raise the cap or shrink the batch")
+        return _parse_map(text), text
 
-    def discover(self, samples: list[str]) -> list[str]:
-        got = self._call(self._DISCOVER_SYSTEM,
-                         "Records:\n" + json.dumps([s[:400] for s in samples], indent=1),
-                         max_tokens=1500)
-        if isinstance(got, list):                       # a bare JSON array
-            acts = got
-        elif isinstance(got, dict):
-            # the documented key, else the only list-valued key it returned
-            acts = got.get("activities")
-            if not isinstance(acts, list):
-                acts = next((v for v in got.values() if isinstance(v, list)), [])
-        else:
-            acts = []
-        return [str(a) for a in acts if isinstance(a, str) and a.strip()]
+    # Keys a model plausibly answers under, the documented one first.
+    _PROCESS_KEYS = ("processes", "process", "kinds", "families", "workstreams")
+    _STEP_KEYS = ("steps", "step", "activities", "stages", "phases")
 
-    def classify(self, records: list[dict], vocabulary: list[str]) -> dict[str, dict]:
-        return self._call(
+    def discover(self, samples: list[str]) -> ReadVocabulary:
+        got, raw = self._call(
+            self._DISCOVER_SYSTEM,
+            "Records:\n" + json.dumps([s[:400] for s in samples], indent=1),
+            max_tokens=_DISCOVER_TOKENS)
+        vocab = _vocabulary_from(got, self._PROCESS_KEYS, self._STEP_KEYS)
+        vocab, dropped = _enforce_label_form(vocab)
+        if dropped:
+            self._log(f"[abstraction] {len(dropped)} step label(s) discarded for being "
+                      f"descriptions rather than labels (> {_MAX_LABEL_WORDS} words), e.g. "
+                      f"{dropped[0]!r}")
+        if not vocab and raw:
+            self._log("[abstraction] discovery could not read a process model out of "
+                      f"the model's reply, which was: {raw[:300]!r}")
+        return vocab
+
+    def classify(self, records: list[dict], vocabulary: ReadVocabulary) -> dict[str, dict]:
+        ask = "Processes and their steps:\n" + json.dumps(
+            [{"name": name, "steps": steps}
+             for name, steps in vocabulary.steps_by_process.items()], indent=1)
+        if vocabulary.loose:
+            ask += ("\n\nSteps that belong to no process (use only for a record you "
+                    "cannot place in one): " + json.dumps(vocabulary.loose))
+        got, _ = self._call(
             self._CLASSIFY_SYSTEM,
-            "Activities: " + json.dumps(vocabulary)
+            ask
             + "\n\nRecords:\n" + json.dumps(records, indent=1)
             + "\n\nReturn the JSON. Omit any record you are not sure about.",
-            max_tokens=4000)
+            max_tokens=_CLASSIFY_TOKENS)
+        return got if isinstance(got, dict) else {}
 
 
-def _reproject(m, abstraction: "Abstraction") -> None:
-    """Re-derive the spine, the variants and the findings over what we just read.
+def _enforce_label_form(vocab: ReadVocabulary) -> tuple[ReadVocabulary, list[str]]:
+    """Drop step labels that are descriptions. Returns (vocab, dropped labels)."""
+    def ok(label: str) -> bool:
+        return len(label.split()) <= _MAX_LABEL_WORDS
+
+    dropped = [st for steps in vocab.steps_by_process.values() for st in steps if not ok(st)]
+    dropped += [st for st in vocab.loose if not ok(st)]
+    kept = {name: [st for st in steps if ok(st)]
+            for name, steps in vocab.steps_by_process.items()}
+    return ReadVocabulary(steps_by_process={k: v for k, v in kept.items() if v},
+                          loose=[st for st in vocab.loose if ok(st)]), dropped
+
+
+def _vocabulary_from(obj, process_keys, step_keys) -> ReadVocabulary:
+    """Read `{processes: [{name, steps: [...]}]}` out of whatever shape came back.
+
+    Tolerant in the same way `_names_from` is, and for the same reason: a reply
+    that is right in substance and merely differently shaped used to be filtered
+    to nothing, and the run then reported an empty vocabulary with no sight of
+    what it had been handed.
+    """
+    steps_by_process: dict[str, list[str]] = {}
+    loose: list[str] = []
+    if not isinstance(obj, dict):
+        # a bare list of process objects is a valid answer too
+        obj = {"processes": obj} if isinstance(obj, list) else {}
+
+    raw_processes = None
+    for key in process_keys:
+        if key in obj:
+            raw_processes = obj[key]
+            break
+
+    if isinstance(raw_processes, dict):
+        # {"Invoice settlement": ["Raised", "Paid"], ...}
+        for name, steps in raw_processes.items():
+            names = _names_from(steps)
+            if str(name).strip() and names:
+                steps_by_process[str(name).strip()] = names
+    elif isinstance(raw_processes, list):
+        for item in raw_processes:
+            if isinstance(item, str) and item.strip():
+                steps_by_process.setdefault(item.strip(), [])
+                continue
+            if not isinstance(item, dict):
+                continue
+            name = next((str(item[k]).strip() for k in ("name", "process", "title", "label")
+                         if isinstance(item.get(k), str) and item[k].strip()), None)
+            steps: list[str] = []
+            for k in step_keys:
+                if k in item:
+                    steps = _names_from(item[k])
+                    if steps:
+                        break
+            if name:
+                steps_by_process[name] = steps
+
+    # A flat step list alongside (or instead of) the nested one belongs to no
+    # process; it is still usable, just never as a claim about a family.
+    for key in step_keys:
+        if key in obj:
+            loose = [st for st in _names_from(obj[key])
+                     if not any(st in v for v in steps_by_process.values())]
+            if loose:
+                break
+
+    steps_by_process = {k: v for k, v in steps_by_process.items() if v}
+    return ReadVocabulary(steps_by_process=steps_by_process, loose=loose)
+
+
+def _process_of_case(m, abstraction: "Abstraction") -> dict[str, str]:
+    """Place each run in a process family, by COUNTING its records' readings.
+
+    This is the line that keeps the model in its lane. The model named the
+    families and read each record into one; the run's family is then whichever
+    the plurality of its own records evidenced — arithmetic the engine does, over
+    labels the model supplied. Nothing ever asks a model "what process is this
+    thread?", because answering that is drawing a boundary, and drawing
+    boundaries is structural work.
+
+    A tie is broken by the earliest record, so the answer does not depend on dict
+    order. A run whose records were all declined gets no family and stays in its
+    structural cluster.
+    """
+    from collections import Counter
+
+    out: dict[str, str] = {}
+    for case in m.cases.values():
+        votes = Counter()
+        first_seen: dict[str, int] = {}
+        for i, eid in enumerate(case.ordered_event_ids):
+            proc = abstraction.process_of(eid)
+            if proc:
+                votes[proc] += 1
+                first_seen.setdefault(proc, i)
+        if votes:
+            out[case.id] = min(votes, key=lambda p: (-votes[p], first_seen[p]))
+    return out
+
+
+def _reproject(m, abstraction: "Abstraction", log=None) -> None:
+    """Re-derive the kinds, the spine, the variants and the findings over what
+    we just read.
 
     Without this the reading is a view-layer decoration: `induce()` computed
     every case's trace, every kind's variants and every gap from the RAW VERBS,
@@ -538,18 +1002,28 @@ def _reproject(m, abstraction: "Abstraction") -> None:
     comparing `sent → replied` against a one-step common path and finding, by
     construction, nothing.
 
-    The fix is not a second detector. It is to re-run the existing one over the
+    The fix is not a second detector. It is to re-run the existing ones over the
     corrected spine, so the variants a reader sees, the `Differs how` column, and
     `model.json` all say the same thing — and the finding ("executed with no
     approval on record") is a real `Gap` with evidence, not a label in a chart.
+
+    **Segmentation is re-run too**, and that is the half that was missing. Kinds
+    were clustered on `(automated, case.kind_hint)` before a single record had
+    been read — which for a mailbox is `(False, 'email')` for the entire corpus,
+    one kind, always. Re-segmenting over the process families the reading found
+    is the only way "what are the processes here?" gets an answer from the
+    records rather than from the envelope.
     """
     from collections import defaultdict
 
+    from induction.honesty import apply_reject
     from induction.model import direct, model
     from induction.process import Step
     from induction.steps.gaps_generic import infer_missing_step_gaps
+    from induction.steps.segment import segment
     from induction.steps.variants import induced_variants
 
+    log = log or (lambda msg: None)
     types = {e.id: e.type for e in m.shaped.entities}
     events = {e.id: e for e in m.shaped.events}
 
@@ -561,22 +1035,54 @@ def _reproject(m, abstraction: "Abstraction") -> None:
             ev.id, types.get(ev.entity_id, "record"), ev.action) or ev.action
 
     # 1. the spine — consecutive records realising one activity are one step,
-    #    matching exactly how the inspector folds them.
+    #    matching exactly how the inspector folds them. Done FIRST, because
+    #    segment() reads each case's trace to compute its variants.
+    #
+    #    A record the reading DECLINED contributes no step. It kept its source's
+    #    own verb, which is the honest thing to hold about it, but that verb is
+    #    the absence of a claim and putting it in the spine states the opposite:
+    #    it makes `Sent` a stage of the process, gives the variant counter a step
+    #    that means "unknown", and hands `infer_missing_step_gaps` a common path
+    #    with a hole shaped like a step. The record is not dropped — it stays on
+    #    its case, in the run detail, in model.json, and in the abstention count
+    #    the inspector prints. It just does not get to be a stage.
+    read_ran = bool(abstraction.by_record)
+
+    def step_of(event_id):
+        if read_ran:
+            rec = abstraction.by_record.get(event_id)
+            return rec["activity"] if rec else None
+        return activity(event_id)
+
     for case in m.cases.values():
         seq: list[str] = []
         for eid in case.ordered_event_ids:
-            act = activity(eid)
+            act = step_of(eid)
             if act and (not seq or seq[-1] != act):
                 seq.append(act)
-        if seq:
-            case.trace_signature = tuple(seq)
+        case.trace_signature = tuple(seq)
 
-    # 2. variants, recounted over the new alphabet
+    # 2. the kinds, re-clustered on what each run was READ to be about
+    abstraction.by_case = _process_of_case(m, abstraction)
+    if abstraction.by_case:
+        from induction.profiles import GENERIC_PROFILE
+        profile = getattr(m, "profile", None) or GENERIC_PROFILE
+        before = len(m.kinds)
+        kinds = segment(m.shaped, m.correlation, profile,
+                        case_process=abstraction.by_case)
+        apply_reject(kinds, profile)
+        m.kinds = kinds
+        placed = len(abstraction.by_case)
+        log(f"abstraction: re-segmented on what the records say — {before} kind(s) "
+            f"from the envelope, {len(kinds)} from the reading "
+            f"({placed} of {len(m.cases)} runs placed in a process)")
+
+    # 3. variants, recounted over the new alphabet
     for kind in m.kinds:
         kind.variants, kind.dfg = induced_variants(kind.case_ids, m.cases)
         kind.steps = sorted({a for v in kind.variants for a in v.signature})
 
-    # 3. the step catalogue. `label.py` built it during induce(), keyed on the raw
+    # 4. the step catalogue. `label.py` built it during induce(), keyed on the raw
     #    verb — so without this `model.json` ships two disagreeing vocabularies:
     #    `steps: [step:sent]` beside cases whose traces say `Requested`, and a
     #    consumer joining on `step:{action}` finds nothing for a read activity.
@@ -599,6 +1105,6 @@ def _reproject(m, abstraction: "Abstraction") -> None:
             attrs={"count": len(evs), "n_members": len(members), "n_read": n_read},
         ))
 
-    # 4. the one detector, re-run now that a common path has more than one step
+    # 5. the detectors, re-run now that a common path has more than one step
     m.gaps = [g for g in m.gaps if g.kind != "missing_expected_step"]
     m.gaps.extend(infer_missing_step_gaps(m.correlation, m.kinds))

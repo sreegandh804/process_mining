@@ -82,15 +82,65 @@ so **without a key its steps read `sent → sent`**; with `ANTHROPIC_API_KEY` se
 the record-reading pass turns those into real activities (Requested, Approved, …),
 each quoting the line it was read from.
 
+### The full run, with the model tier on
+
+Export a key, then read the mailbox. This is the run that produces processes and
+steps read from the records rather than from the transport verb:
+
 ```bash
-python run_combined.py --demo          # two sources at once (offline demo, no key)
-python run.py                          # a git corpus (after: python ingest.py …)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+python3 run_email.py --path samples/enron
+```
+
+That is ~14 model calls for the reading and naming, plus up to 200 short calls
+for the semantic judge. Each seam takes its own model, so the expensive one can
+stay sharp while the chatty one stays cheap:
+
+```bash
+INDUCTION_ACTIVITY_MODEL=claude-opus-5 \
+INDUCTION_NAMING_MODEL=claude-opus-5 \
+INDUCTION_SEMANTIC_MODEL=claude-haiku-4-5 \
+python3 run_email.py --path samples/enron
+```
+
+`INDUCTION_ACTIVITY_MODEL` is the one worth keeping on the strongest model: it
+runs the pass that derives the corpus's vocabulary, and everything downstream is
+graded against it. `INDUCTION_SEMANTIC_MODEL` is a narrow same-work-or-not
+verdict repeated a couple of hundred times, which is why it defaults cheaper.
+
+Progress streams to stderr as it goes, so a multi-minute run is never a silent
+wait — including the line that matters most:
+
+```
+· abstraction: verbs are transport, reading 263 records
+· abstraction: reading 263 records into 8 activities (…) — 11 batch(es)
+· abstraction: and into 7 processes (…) — these become the kinds
+· abstraction: read 107 of 263 records (156 declined) · 75 placed in a process
+· abstraction: re-segmented on what the records say — 1 kind from the envelope,
+    4 from the reading
+```
+
+**`156 declined` is the trust number.** A record the model would not commit to
+keeps its raw verb and says so in the audit table, rather than being folded into
+a step it does not evidence. If that number is most of the corpus, the reading
+did not understand this data — and you can see that at a glance instead of
+inferring it.
+
+Open `out/inspector.html`; read `out/model.json`.
+
+### The other runners
+
+```bash
+python3 run_tabular.py                  # spreadsheets (samples/finance)
+python3 run_combined.py --demo          # two sources at once (offline demo, no key)
+python3 run.py                          # a git corpus (after: python3 ingest.py …)
 ```
 
 The **LLM tier is on by default** (activity naming + reading; needs
 `ANTHROPIC_API_KEY`). With no key it downshifts to the deterministic, offline
-baseline and says so on the first line; `--no-llm` forces that baseline. Open
-`out/inspector.html`; read `out/model.json`. Run the tests with `pytest`.
+baseline and says so on the first line; `--no-llm` forces that baseline. Run the
+tests with `pytest`.
 
 ## What it can't conclude
 

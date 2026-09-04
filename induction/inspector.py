@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from induction.abstraction import Abstraction
+from induction.steps.variants import shape
 from induction.emit import disclaimers_for
 from induction.pipeline import InducedModel
 
@@ -48,7 +49,28 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     def step_label(a: str) -> str:
         return (names.get("steps", {}) or {}).get(a) or base_step.get(a) or a.replace("_", " ").title()
 
+    abstraction = Abstraction.of(activities)
+    read_ran = bool(abstraction.by_case)
+
     def kind_label(k) -> str:
+        # A kind the reading tier formed already wears the family name the model
+        # read out of its own records. The namer must not overwrite that: it ran
+        # against the pre-reading kinds, so its map is keyed on ids that no
+        # longer mean the same thing, and its whole purpose (rescuing
+        # "Send then forward email") is already served here.
+        feats = getattr(k, "features", {})
+        if feats.get("read_process"):
+            return k.name
+        if read_ran:
+            # The leftover kind, once the reading has run: the runs it declined
+            # to place. It must NOT be handed to the namer, which will look at
+            # its subject terms and christen the reject pile something confident
+            # and false — on a real mailbox it produced "Supplier & Sales
+            # Inquiries" for 36 threads, 21 of which had every single record
+            # declined. A bucket of "we could not read these" presented as a
+            # business process is the exact dishonesty the rest of this page is
+            # built to avoid.
+            return "Not placed in a process"
         return (names.get("kinds", {}) or {}).get(k.id) or k.name
 
     gaps_by_case = defaultdict(list)
@@ -91,13 +113,30 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     # itself is sortable/filterable, so just keep a stable, readable order.
     runs.sort(key=lambda r: (0 if r["dev_key"] == "usual" else 1, r["id"]))
 
+    # Mark every step as read or not BEFORE the cards are built: `_process_view`
+    # draws its path from the read steps only, so it has to know which those are.
+    # (Computing this after the cards silently gave every card an unread count of
+    # zero and put the raw verbs back in the paths.)
+    vocabulary = _naming_provenance(m, abstraction)
+    read_names = {row["activity"] for row in abstraction.vocabulary
+                  if not row.get("unclassified")}
+    for r in runs:
+        # A run carries an unread record when one of its steps is still the
+        # source's own verb — i.e. the classifier declined it. Surfacing that per
+        # run is what makes the abstention count checkable instead of a total.
+        for n in r["activities"]:
+            n["unread_step"] = bool(read_names) and n["name"] not in read_names
+        r["unread"] = any(n["unread_step"] for n in r["activities"])
+
     # The kind cards' flow and variants are built from the runs' ACTIVITY spines —
     # the same abstraction the detail shows — so "the processes we found" reads as
     # activities (Raised → Fixed → Shipped), not the raw artefact verbs.
     runs_by_kind = defaultdict(list)
     for rv in runs:
         runs_by_kind[rv["kind_id"]].append(rv)
-    processes = [_process_view(k, m, kind_label, runs_by_kind.get(k.id, [])) for k in m.kinds]
+    processes = [_process_view(k, m, kind_label, runs_by_kind.get(k.id, []), read_ran,
+                               abstraction.steps_by_process)
+                 for k in m.kinds]
 
     # Filter buttons carry a GENERIC label per group (rows keep their specific
     # one), so "Ended early" doesn't masquerade as one particular end point.
@@ -121,16 +160,6 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     orphans = [{"id": o.entity_id.split(":")[-1], "reason": o.reason,
                 "src": (o.evidence[0].locator if o.evidence else "")} for o in m.orphans]
 
-    abstraction = Abstraction.of(activities)
-    vocabulary = _naming_provenance(m, abstraction)
-    read_names = {row["activity"] for row in abstraction.vocabulary
-                  if not row.get("unclassified")}
-    for r in runs:
-        # A run carries an unread record when one of its steps is still the
-        # source's own verb — i.e. the classifier declined it. Surfacing that per
-        # run is what makes the abstention count checkable instead of a total.
-        r["unread"] = bool(read_names) and any(
-            n["name"] not in read_names for n in r["activities"])
 
     return {
         "meta": {
@@ -218,7 +247,15 @@ def _canon(kind) -> list[str]:
     return out
 
 
-def _process_view(k, m, kind_label, kind_runs) -> dict:
+# Below this many runs, "every run took a different path" is not a finding — it
+# is a sample of two. A judgement call in the same spirit as
+# `abstraction._MIN_RUNS_TO_JUDGE`: state the absence of a usual way only where
+# there were enough runs for one to have shown up.
+_MIN_RUNS_FOR_NO_COMMON = 4
+
+
+def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False,
+                  steps_by_process: dict | None = None) -> dict:
     # actors from the kind's events (richer than one-per-run)
     ev_by_id = {e.id: e for e in m.shaped.events}
     pname = {e.id: e.attrs.get("name", e.id) for e in m.shaped.entities if e.type == "person"}
@@ -235,27 +272,204 @@ def _process_view(k, m, kind_label, kind_runs) -> dict:
     # raw artefact verbs the systems happened to record. A variant is a distinct
     # activity path; its frequency is how many runs took it.
     ident = lambda x: x
-    sigs = Counter(tuple(n["name"] for n in rv["activities"]) for rv in kind_runs)
-    canon = list(max(sigs, key=lambda s: (sigs[s], len(s))) if sigs else ())
+    leftover = read_ran and not k.features.get("read_process")
+
+    # THE PATH IS THE STEPS, NOT THE RECORDS.
+    #
+    # A record the reading declined keeps its source's own verb — `Sent` — and
+    # that is the honest thing to do with it. Rendering it INLINE IN THE PATH is
+    # not: it puts a claim ("Requested": the model read this and quoted the line)
+    # and the absence of a claim ("Sent": nobody knows what this was) in one
+    # chain, as if they were the same kind of thing. On a real mailbox that
+    # produced `Requested -> Sent -> Reviewed -> Sent -> Sent`, which reads as a
+    # process with a step called Sent and is not what anyone meant.
+    #
+    # A process is `Screened -> Interviewed -> Offered`. So the path shows the
+    # steps that were actually read, and the records that were not are counted
+    # beside it rather than drawn into it. Nothing is hidden — every message is
+    # still in the run detail, still in `model.json`, and the count is on the
+    # card — but the shape of the process is no longer diluted by the records
+    # that could not contribute to it.
+    def read_seq(rv):
+        return tuple(n["name"] for n in rv["activities"] if not n.get("unread_step"))
+
+    n_unread = sum(1 for rv in kind_runs for n in rv["activities"]
+                   if n.get("unread_step") for _ in n["arts"])
+    n_records = sum(len(n["arts"]) for rv in kind_runs for n in rv["activities"])
+    runs_with_steps = [rv for rv in kind_runs if read_seq(rv)]
+
+    # Variants at the SHAPE level — distinct steps in first-occurrence order —
+    # so a loop-back or a re-sent reply is not a new "different order" row. The
+    # exact traces are kept per shape and shown as detail. See variants.shape.
+    exact: dict[tuple, Counter] = defaultdict(Counter)
+    for rv in runs_with_steps:
+        seq = read_seq(rv)
+        exact[shape(seq)][seq] += 1
+    sigs = Counter({sh: sum(c.values()) for sh, c in exact.items()})
     max_freq = max(sigs.values(), default=1)
+
+    # A common path only exists if some path is actually COMMON. Where every run
+    # took a different route, `max()` broke the all-tied-at-one tie BY LENGTH, so
+    # the card presented the single longest, most chaotic run as the canonical
+    # process — a 21-step chain labelled "most common" above six runs that shared
+    # nothing. That is the worst available answer to "how does this usually go",
+    # and it is a claim the data does not support.
+    #
+    # Two corrections, because "nothing repeated" means different things at
+    # different sizes. With enough runs it is a real finding — say there is no
+    # usual way and let the list below carry the truth. With two runs it is
+    # unremarkable, and refusing to summarise would be over-correcting; show a
+    # representative path, but break the tie by the SHORTEST rather than the
+    # longest, since length-bias is what produced the 21-step monster.
+    all_unique = max_freq == 1 and len(sigs) > 1
+    no_common = all_unique and len(runs_with_steps) >= _MIN_RUNS_FOR_NO_COMMON
+    if not sigs:
+        canon = []
+    elif no_common:
+        canon = []
+    elif all_unique:
+        canon = list(min(sigs, key=lambda s: (len(s), s)))
+    else:
+        canon = list(max(sigs, key=lambda s: (sigs[s], len(s))))
+
+    # THE CARD'S HEADLINE IS THE PROCESS, NOT ONE RUN OF IT.
+    #
+    # `canon` above is the most frequent TRACE, and that is the right thing to
+    # label "most common" in the list of variants below. It is the wrong thing to
+    # put at the top of the card as the process's shape, and on a corpus with any
+    # abstention it collapses to a single chip: "Research Collaboration:
+    # Approved" — which means three of its runs had exactly one readable record
+    # and it happened to be an approval. Seven runs that between them show
+    # Requested, Approved and Escalated were summarised as one word.
+    #
+    # A process is its STEPS. Hiring is `Screened -> Interviewed -> Offered`; it
+    # is not whichever single stage the most candidates happen to share. So the
+    # headline is every step this kind's runs perform, ordered by where those
+    # runs typically put it — the same ordering `gaps_generic._canonical_order`
+    # uses, minus its majority bar, because describing a process is a weaker
+    # claim than accusing a run of skipping part of one.
+    #
+    # The variant list underneath still carries what actually happened, run by
+    # run, so the summary can never be mistaken for a claim that every run took
+    # all of these steps.
+    # Ordering comes only from runs that HAVE an order. A one-step run says
+    # nothing about where its step belongs — but scored naively it says
+    # "position 0.0", so any step that often appears alone gets dragged to the
+    # front: seven Research Collaboration runs came out `Approved -> Requested
+    # -> Escalated`, approved before requested, purely because three runs had a
+    # lone approval in them. Such runs still contribute the STEP; they just do
+    # not get a vote on where it goes.
+    seen_steps: dict[str, int] = defaultdict(int)
+    where: dict[str, list[float]] = defaultdict(list)
+    for rv in runs_with_steps:
+        seq = read_seq(rv)
+        for step in seq:
+            seen_steps[step] += 1
+        if len(seq) < 2:
+            continue
+        span = len(seq) - 1
+        for i, step in enumerate(seq):
+            where[step].append(i / span)
+
+    def _at(step):
+        # A step only ever seen alone sorts last rather than first: we know it
+        # happens, and we do not know when.
+        return sum(where[step]) / len(where[step]) if where.get(step) else 1.1
+
+    flow = sorted(seen_steps, key=lambda st: (_at(st), -seen_steps[st], st))
+
+    # WHERE A PROCESS DEFINITION EXISTS, IT DEFINES THE HEADLINE.
+    #
+    # Two things go wrong when the headline is derived from the runs instead:
+    #
+    #  - the ORDER is noise. Discovery already returned each process's steps in
+    #    the order they happen; re-deriving that from three runs with 60%
+    #    abstention produced `Deal booked -> Invoice shortfall pursued ->
+    #    Payment received -> Manual invoice created`, which is the right steps
+    #    in nearly the wrong order. The definition's order is a claim the model
+    #    actually made; the observed order here is a small, gappy sample of it.
+    #
+    #  - the MEMBERSHIP leaks. A run is placed in a kind by majority vote over
+    #    its records, so a run can sit in one process while carrying records read
+    #    into another's steps. The card then advertises steps belonging to a
+    #    different process — "Academic Visit" was listing "Research idea scoped
+    #    with faculty", which is University Research Sponsorship's step.
+    #
+    # So: the definition's steps, in the definition's order, filtered to those
+    # some run here actually performed. Steps a run performed that belong to
+    # another process stay in the variant list below, where they are evidence of
+    # what happened rather than a claim about this process.
+    defined = (steps_by_process or {}).get(k.features.get("read_process") or "")
+    if defined:
+        flow = [st for st in defined if st in seen_steps]
+
+    # The leftover kind is not a process and must not be drawn as one. Its runs
+    # are the ones the reading declined to place; a flow across them would be a
+    # shape assembled from whatever happened to be readable in a reject pile.
+    if leftover:
+        flow = []
     paths = [{
         "count": freq,
         "seq": list(sig),
-        "label": _path_label(sig, canon, ident),
+        "label": "" if no_common else _path_label(sig, canon, ident),
         "rare": freq == 1 and len(sigs) > 1,
         "width": max(6, round(freq / max_freq * 180)),
+        # how many distinct exact traces sit under this shape (loops, re-sends)
+        "n_traces": len(exact[sig]),
     } for sig, freq in sigs.most_common()]
+
+    # The leftover kind is the runs the reading could not place. It has a count
+    # and a reason; it does not have paths. Three variant rows assembled from
+    # nine readable records out of 105 is a shape made of noise.
+    if leftover:
+        paths, no_common = [], False
 
     return {
         "id": k.id,
         "name": kind_label(k),
         "count": len(k.case_ids),
         "actors": [a for a, _ in actors.most_common(6)],
-        "flow": canon,
+        "flow": flow,
+        "canon": canon,
         "paths": paths,
+        # Said out loud rather than left for a reader to infer from N paths at 1x.
+        "no_common": no_common,
+        "n_paths": len(sigs),
+        # What the path does NOT account for, so the omission is visible.
+        "n_unread": n_unread,
+        "n_records": n_records,
+        "n_runs_unread": len(kind_runs) - len(runs_with_steps),
         "flagged": k.rejected,
         "flag_note": k.reject_reason or "",
+        # Where this process boundary came from. Nothing in the data announces
+        # one, so the card has to say who drew it and on what — the same
+        # discipline every other claim on the page is held to.
+        "tier": k.confidence.tier.label,
+        "why": _boundary_why(k, kind_runs, read_ran),
+        "leftover": leftover,
+        # A one-off with a real arc: shown, and labelled for what it is.
+        "project": bool(k.features.get("project")),
     }
+
+
+def _boundary_why(k, kind_runs, read_ran: bool) -> str:
+    """What to say about where this kind's boundary came from.
+
+    For a read kind, the confidence rationale already says it. For the LEFTOVER
+    kind once the reading has run, the rationale ("structural clustering, not
+    read") is true but tells a reader nothing about why these runs are here —
+    they are here because the reading DECLINED them, and how many were declined
+    outright is the number that says whether to care about this card at all.
+    """
+    if not (read_ran and not k.features.get("read_process")):
+        return k.confidence.rationale or ""
+    fully = sum(1 for rv in kind_runs
+                if rv.get("activities") and all(n.get("unread_step") for n in rv["activities"]))
+    n = len(kind_runs)
+    return (f"Not a process the records evidence — these are the {n} runs the reading "
+            f"could not place in one"
+            + (f", {fully} of which had every single record declined. " if fully else ". ")
+            + "They keep the structural grouping and their source's own verbs.")
 
 
 def _path_label(sig, canon, step_label) -> str:
@@ -545,6 +759,15 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .proc.flagged{background:#fbfaf6;border-style:dashed;border-color:#e6d8b8}
   .proc .pt{font-size:18px;font-weight:700}
   .proc .pmeta{color:var(--ink-2);font-size:13px;margin-top:2px}
+  .proc .pwhy{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:8px;
+    padding-left:10px;border-left:2px solid var(--line)}
+  .path .ntr{color:var(--ink-3);font-size:11px}
+  .proc .ptag{display:inline-block;font-size:11px;font-weight:600;color:var(--attn);
+    background:var(--attn-soft);border-radius:999px;padding:2px 9px;margin-left:8px;vertical-align:middle}
+  .proc .plabel{color:var(--ink-3);font-size:11px;text-transform:uppercase;
+    letter-spacing:.05em;font-weight:600;margin-top:14px}
+  .proc .pnone{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:10px;
+    padding:8px 10px;background:var(--bg);border-radius:8px}
   .flag-note{font-size:13px;color:var(--flag);background:var(--attn-soft);border-radius:8px;padding:9px 12px;margin-top:12px}
   .flow{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
   .step{background:var(--accent-soft);color:var(--accent);border:1px solid #cfe0fb;border-radius:8px;padding:5px 11px;font-size:13px;font-weight:600}
@@ -648,14 +871,18 @@ document.getElementById('thId').textContent = cap(V.meta.item);
 
 document.getElementById('procs').innerHTML = V.processes.map(p=>`
   <div class="proc ${p.flagged?'flagged':''}">
-    <div class="pt">${esc(p.name)}</div>
+    <div class="pt">${esc(p.name)}${p.project?' <span class="ptag">project — happened once</span>':''}</div>
     <div class="pmeta">${p.count} ${esc(V.meta.items)}${p.actors.length?' · '+p.actors.map(esc).join(', '):''}</div>
-    ${p.flow.length?`<div class="flow">${p.flow.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${esc(s)}</span>`).join('')}</div>`:''}
+    ${p.why?`<div class="pwhy"><b>Why these are one process (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
+    ${p.flow.length?`<div class="plabel">The steps this process is made of, in the order they usually happen</div>
+    <div class="flow">${p.flow.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${esc(s)}</span>`).join('')}</div>`:''}
+    ${p.no_common?`<div class="pnone">No usual way. Every ${esc(V.meta.item)} here took a different path through those steps \u2014 ${p.n_paths} of them, each seen once. All are listed below.</div>`:''}
+    ${p.n_unread?`<div class="pnone">The path above is the steps that were <b>read</b>. ${p.n_unread} of this process\u2019s ${p.n_records} records were declined by the model and keep the source\u2019s own verb, so they are counted here rather than drawn as steps${p.n_runs_unread?` (${p.n_runs_unread} ${esc(p.n_runs_unread===1?V.meta.item:V.meta.items)} had no step read at all)`:''}.</div>`:''}
     ${p.flagged?`<div class="flag-note"><b>Grouped separately.</b> ${esc(p.flag_note)}</div>`:''}
     <div class="paths">${p.paths.map(pa=>`
       <div class="path ${pa.rare?'rare':''}"><span class="cnt">${pa.count}×</span>
         <div class="bar" style="width:${pa.width}px"></div>
-        <span class="seq">${pa.seq.map(esc).join(' → ')||'—'}</span>
+        <span class="seq">${pa.seq.map(esc).join(' → ')||'—'}${pa.n_traces>1?` <span class="ntr">(${pa.n_traces} exact routes)</span>`:''}</span>
         <span class="lbl">${esc(pa.label)}</span></div>`).join('')}</div>
   </div>`).join('');
 
