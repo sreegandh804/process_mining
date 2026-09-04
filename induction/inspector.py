@@ -161,9 +161,26 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
                 "src": (o.evidence[0].locator if o.evidence else "")} for o in m.orphans]
 
 
+    leftover_ids = {k.id for k in m.kinds if read_ran and not k.features.get("read_process")}
+    for r in runs:
+        # Why a run sits in the leftover — so the leftover pane can group by cause
+        # instead of listing 37 rows that all look the same.
+        if r["kind_id"] in leftover_ids:
+            any_read = any(not n.get("unread_step") for n in r["activities"])
+            r["reason"] = ("some records read, but too few to sit inside any process"
+                           if any_read else "no record in it named a step — every one kept the source's own verb")
+    n_projects = sum(1 for k in m.kinds if k.features.get("project"))
+    n_unplaced = sum(1 for r in runs if r["kind_id"] in leftover_ids)
+
     return {
         "meta": {
             "title": "How the work runs" if items == "runs" else f"How your {items} run",
+            "n_records": sum(1 for e in shaped.entities if e.type not in ("person", "orphan_row")),
+            "n_runs": len(runs),
+            "n_processes": len([k for k in m.kinds if k.id not in leftover_ids and not k.features.get("project")]),
+            "n_projects": n_projects,
+            "n_unplaced": n_unplaced,
+            "read_ran": read_ran,
             "corpus": _corpus_line(m, items),
             "scope": disclaimers_for(m),
             "ai_named": bool(names.get("_ai")),
@@ -726,245 +743,269 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>How the work runs</title>
 <style>
-  :root{--bg:#f7f8fa;--card:#fff;--ink:#1a1f2b;--ink-2:#57616f;--ink-3:#8a94a3;
-    --line:#e6e9ef;--line-2:#d6dbe4;--accent:#2f6ae0;--accent-soft:#eaf1fd;
-    --attn:#b4601a;--attn-soft:#fbf1e7;--flag:#9a6b00;
-    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;--mono:ui-monospace,'SF Mono',Menlo,monospace;}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:var(--sans);background:var(--bg);color:var(--ink);line-height:1.55;font-size:15px;-webkit-font-smoothing:antialiased}
-  .wrap{max-width:920px;margin:0 auto;padding:32px 24px 80px}
-  h1{font-size:23px;font-weight:700;letter-spacing:-.01em}
-  .source{color:var(--ink-2);margin-top:6px;font-size:14px}.source b{color:var(--ink);font-weight:600}
-  table.vocab{width:100%;border-collapse:collapse;margin-top:4px}
-  table.vocab th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
-    color:var(--ink-3);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line-2)}
-  table.vocab th.num,table.vocab td.num{text-align:right;font-variant-numeric:tabular-nums}
-  .vrow{cursor:pointer;border-bottom:1px solid var(--line)}
-  .vrow>td{padding:9px 10px;vertical-align:top;font-size:13px}
-  .vrow:hover{background:var(--accent-soft)}
-  .vrow.on{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
-  .vrow.vunread>td:first-child b{color:var(--attn)}
-  .vnote{font-size:12px;color:var(--ink-3);margin-top:2px}
-  .vph{color:var(--ink-2)}
-  .tier-tag{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3);
-    border:1px solid var(--line-2);border-radius:4px;padding:0 5px;margin-left:4px}
-  .phs{margin-top:5px}
-  .ph{display:inline-block;background:var(--bg);border:1px solid var(--line-2);border-radius:4px;
-    padding:1px 6px;margin:0 4px 4px 0;font-family:var(--mono);font-size:11px}
-  .ai{display:inline-block;font-size:11px;color:var(--accent);background:var(--accent-soft);border-radius:5px;padding:1px 7px;margin-left:6px}
-  section{margin-top:36px}
-  .sec-h{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
-  .sec-lead{font-size:14px;color:var(--ink-2);margin-bottom:16px}
-  .proc{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:14px}
-  .proc.flagged{background:#fbfaf6;border-style:dashed;border-color:#e6d8b8}
-  .proc .pt{font-size:18px;font-weight:700}
-  .proc .pmeta{color:var(--ink-2);font-size:13px;margin-top:2px}
-  .proc .pwhy{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:8px;
-    padding-left:10px;border-left:2px solid var(--line)}
-  .path .ntr{color:var(--ink-3);font-size:11px}
-  .proc .ptag{display:inline-block;font-size:11px;font-weight:600;color:var(--attn);
-    background:var(--attn-soft);border-radius:999px;padding:2px 9px;margin-left:8px;vertical-align:middle}
-  .proc .plabel{color:var(--ink-3);font-size:11px;text-transform:uppercase;
-    letter-spacing:.05em;font-weight:600;margin-top:14px}
-  .proc .pnone{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:10px;
-    padding:8px 10px;background:var(--bg);border-radius:8px}
-  .flag-note{font-size:13px;color:var(--flag);background:var(--attn-soft);border-radius:8px;padding:9px 12px;margin-top:12px}
-  .flow{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
-  .step{background:var(--accent-soft);color:var(--accent);border:1px solid #cfe0fb;border-radius:8px;padding:5px 11px;font-size:13px;font-weight:600}
-  .arrow{color:var(--ink-3)}
-  .paths{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
-  .path{display:flex;align-items:center;gap:12px;padding:5px 0;font-size:13px}
-  .path .bar{height:8px;border-radius:4px;background:var(--accent);min-width:6px}
-  .path.rare .bar{background:var(--line-2)}
-  .path .cnt{font-variant-numeric:tabular-nums;font-weight:700;width:44px}
-  .path .seq{color:var(--ink-2)}.path .lbl{color:var(--ink-3);font-size:12px;margin-left:auto;white-space:nowrap}
-  .filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px}
-  .fbtn{font-size:13px;padding:7px 13px;border:1px solid var(--line-2);background:var(--card);border-radius:20px;cursor:pointer;color:var(--ink-2)}
-  .fbtn .n{font-variant-numeric:tabular-nums;font-weight:700;color:var(--ink)}
-  .fbtn.attn .n{color:var(--attn)}.fbtn:hover{background:#fafbfc}
-  .fbtn.on{background:var(--ink);color:#fff;border-color:var(--ink)}.fbtn.on .n{color:#fff}
-  .searchrow{margin:12px 0}
-  .searchrow input{width:100%;padding:9px 13px;border:1px solid var(--line-2);border-radius:9px;font:14px var(--sans);outline:none}
-  .searchrow input:focus{border-color:var(--accent)}
-  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-  thead th{text-align:left;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);padding:11px 14px;border-bottom:1px solid var(--line);background:#fbfcfd}
-  tbody tr.run{border-bottom:1px solid var(--line);cursor:pointer}tbody tr.run:last-child{border-bottom:none}
-  tbody tr.run:hover{background:#fafbfc}
-  td{padding:11px 14px;font-size:13.5px;vertical-align:top}
-  td.id{font-family:var(--mono);font-size:12.5px}td.path-c{color:var(--ink-2);font-size:12.5px}
-  .dev{font-size:12.5px;color:var(--ink-3)}.dev.attn{color:var(--attn);font-weight:600}
-  .kind{font-size:12.5px;color:var(--ink-2)}.kind.flag{color:var(--flag)}
-  .rtitle{font-weight:600;color:var(--ink);font-size:13.5px}
-  .rsub{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin-top:2px}
-  .tchip{display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;padding:1px 6px;border-radius:4px;margin-left:6px;vertical-align:middle}
-  .tchip.t-soft{color:var(--flag);background:var(--attn-soft)}
-  .tchip.t-ai{color:var(--accent);background:var(--accent-soft);border:1px dashed #b8ccf5}
-  .xchip{display:inline-block;font-size:10px;font-weight:600;color:var(--ink-2);background:#eef1f5;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle}
-  .why{font-size:12.5px;color:var(--accent);background:var(--accent-soft);border-radius:8px;padding:8px 12px;margin:2px 20px 10px}.why b{color:var(--ink)}
-  .actnode{padding:2px 20px 6px}.actnode+.actnode{border-top:1px solid var(--line);padding-top:9px;margin-top:5px}
-  .acth{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-  .actn{font-weight:700;font-size:14px;color:var(--ink)}.actnode.inf .actn{color:var(--attn)}
-  .actm{font-size:11.5px;color:var(--ink-3)}
-  .arts{margin:5px 0 0}
-  .art{font-size:10.5px;color:var(--ink-2);background:#eef1f5;border-radius:4px;padding:0 6px;margin-left:6px;font-weight:600}
-  .evlabel{font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.05em;margin:5px 0 1px}
-  .evref{font-weight:600;color:var(--ink)}
-  .evverb{color:var(--ink-2);font-weight:400;margin-left:7px}
-  .ev .src a{color:var(--accent);text-decoration:none;font-weight:600}.ev .src a:hover{text-decoration:underline}
-  .framing{font-size:12.5px;color:var(--ink-2);background:#f2f5fb;border:1px solid var(--line);border-radius:9px;padding:9px 13px;margin:10px 0 4px}.framing b{color:var(--ink)}
-  .detail td{padding:0;background:#fbfcfd}
-  .tl{padding:14px 20px 16px}.tl .tlh{font-size:11.5px;color:var(--ink-3);margin-bottom:10px;font-family:var(--mono)}
-  .ev{display:grid;grid-template-columns:190px 1fr auto;gap:12px;align-items:baseline;padding:6px 0 6px 16px;border-left:2px solid var(--line);margin-left:4px;position:relative}
-  .ev::before{content:"";position:absolute;left:-5px;top:11px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
-  .ev.inf::before{background:#fff;border:2px solid var(--attn)}
-  .ev .en{font-weight:600;font-size:13.5px}.ev .ed{color:var(--ink-2);font-size:13px}
-  .ev.inf .en{color:var(--attn)}.ev .src{font-family:var(--mono);font-size:11px;color:var(--accent)}
-  .inftag{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--attn);background:var(--attn-soft);padding:1px 6px;border-radius:4px;margin-left:6px}
-  .aside{margin-top:12px;font-size:13px;color:var(--ink-2)}.aside b{color:var(--ink)}
-  .scope{margin-top:30px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-3)}
-  .scope li{margin:3px 0 3px 18px}
-  @media(max-width:640px){.ev{grid-template-columns:1fr}}
+  :root{--ink:#16181d;--ink-2:#575d6b;--ink-3:#8b909d;--paper:#fff;--canvas:#f5f6f8;--rule:#e3e5ea;--rule-2:#d3d7de;
+    --read:#2b5c8a;--read-bg:#eaf1f7;--read-ink:#1d4467;--open:#8a6b1f;--open-bg:#f7f1e2;--sel:#eceff3;--attn:#b4601a;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+  a{color:var(--read);text-decoration:none}a:hover{text-decoration:underline}
+  :focus-visible{outline:2px solid var(--read);outline-offset:2px}
+  .wrap{max-width:1240px;margin:0 auto;padding:0 24px}
+  header.top{background:var(--paper);border-bottom:1px solid var(--rule)}
+  header.top .wrap{padding-top:26px}
+  h1{font:400 30px/1.2 var(--serif);letter-spacing:-.01em;margin:0 0 8px}
+  .lede{max-width:66ch;color:var(--ink-2);margin:0 0 16px}
+  .ai{font-size:12px;color:var(--read);background:var(--read-bg);border-radius:4px;padding:1px 7px;margin-left:6px}
+  .stats{display:flex;flex-wrap:wrap;gap:0 18px;align-items:baseline;font-size:13.5px;color:var(--ink-2);border-top:1px solid var(--rule);padding:11px 0 13px}
+  .stats b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+  .stats .disclose{margin-left:auto;color:var(--open);background:none;border:1px solid var(--open);border-radius:6px;padding:2px 9px;font:inherit;cursor:pointer}
+  .shell{display:grid;grid-template-columns:238px minmax(0,1fr);gap:24px;padding:22px 0 60px}
+  nav.rail{position:sticky;top:16px;align-self:start;font-size:14px}
+  .railcap{font-size:12.5px;color:var(--ink-3);padding:0 10px 7px}
+  .railcap.mt{padding-top:14px;margin-top:12px;border-top:1px solid var(--rule)}
+  .rowbtn{display:flex;width:100%;gap:8px;align-items:baseline;background:none;border:0;font:inherit;color:var(--ink);text-align:left;padding:6px 10px;border-radius:6px;cursor:pointer}
+  .rowbtn:hover{background:#eef0f3}.rowbtn[aria-current="true"]{background:var(--sel);font-weight:500}
+  .rowbtn .n{margin-left:auto;color:var(--ink-3);font-variant-numeric:tabular-nums;font-weight:400}
+  .rowbtn.quiet{color:var(--ink-2)}.rowbtn.quiet .n{color:var(--open)}
+  main{min-width:0}
+  .card{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:22px 24px}
+  h2{font:400 22px/1.25 var(--serif);margin:0 0 4px}
+  .ptag{display:inline-block;font:500 11.5px/1 var(--sans);color:var(--attn);background:var(--open-bg);border-radius:999px;padding:4px 9px;margin-left:8px;vertical-align:middle}
+  .sub{font-size:13.5px;color:var(--ink-2);margin:0 0 2px;font-variant-numeric:tabular-nums}
+  .who{font-size:13px;color:var(--ink-3);margin:6px 0 0;font-family:var(--mono);word-break:break-word}
+  .why{font-size:13px;color:var(--ink-2);margin:10px 0 0;padding-left:10px;border-left:2px solid var(--rule-2)}
+  .band{border-top:1px solid var(--rule);margin-top:20px;padding-top:16px}
+  .bandhead{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .bandhead h3{font:500 14px/1.3 var(--sans);margin:0}.bandhead .note{font-size:13px;color:var(--ink-3)}
+  .flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .chip{font:inherit;font-size:13px;background:var(--read-bg);color:var(--read-ink);border:1px solid transparent;border-radius:6px;padding:5px 9px;cursor:pointer}
+  .chip .u{border-bottom:1px dotted currentColor}.chip:hover{border-color:var(--read)}
+  .chip[aria-expanded="true"]{background:var(--read);color:#fff}
+  .arw{color:var(--ink-3);font-size:12px}
+  .legend{font-size:12.5px;color:var(--ink-3);margin-top:8px}
+  .prov{margin-top:12px;border:1px solid var(--rule-2);border-radius:8px;background:#fbfcfd;padding:14px 16px}
+  .prov h4{font:500 14px/1.3 var(--sans);margin:0 0 2px}.prov .how{font-size:13px;color:var(--ink-2);margin:0 0 10px}
+  .quote{font-family:var(--mono);font-size:12.5px;line-height:1.5;background:var(--paper);border:1px solid var(--rule);border-radius:5px;padding:7px 9px;margin:0 0 6px}
+  .provfoot{font-size:12.5px;color:var(--ink-3);margin-top:2px}
+  .filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+  .fchip{font:inherit;font-size:12.5px;background:var(--paper);border:1px solid var(--rule-2);border-radius:999px;padding:4px 11px;color:var(--ink-2);cursor:pointer}
+  .fchip:hover{border-color:var(--ink-3)}.fchip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{font-weight:400;font-size:12.5px;color:var(--ink-3);text-align:left;padding:0 10px 6px 0;border-bottom:1px solid var(--rule)}
+  td{padding:9px 10px 9px 0;border-bottom:1px solid var(--rule);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  .runs td:first-child{font-variant-numeric:tabular-nums;color:var(--ink-2);width:44px;white-space:nowrap}
+  .path{color:var(--ink)}
+  td.path1{max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tag{font-size:12px;color:var(--ink-3);white-space:nowrap}.tag.common{color:var(--read)}
+  .search{width:100%;font:inherit;font-size:14px;padding:8px 11px;border:1px solid var(--rule-2);border-radius:8px;margin:0 0 10px}
+  .thread{width:100%;text-align:left;background:none;border:0;font:inherit;cursor:pointer;padding:0;color:inherit}
+  .thread .t{font-weight:500}
+  .thread .id{display:block;font-family:var(--mono);font-size:11.5px;color:var(--ink-3);word-break:break-all;margin-top:2px}
+  .tchip{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--open);background:var(--open-bg);border-radius:3px;padding:1px 6px;margin-left:6px}
+  tr.open td{background:#fafbfc}
+  .detail{padding:4px 0 14px}
+  .framing{font-size:12.5px;color:var(--ink-2);margin:0 0 10px}
+  .step{border-left:2px solid var(--rule-2);padding:0 0 12px 12px;margin-left:2px}
+  .step:last-child{padding-bottom:0}.step.unread{border-left-style:dotted;opacity:.8}
+  .step .sn{font-weight:500;font-size:13.5px}.step .sm{font-size:12.5px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  .ev{display:grid;grid-template-columns:minmax(0,1fr) 92px minmax(0,1.3fr);gap:8px;font-size:12.5px;padding:3px 0}
+  .ev .evverb{color:var(--ink-2)}.ev .src{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);word-break:break-all}
+  .ev.inf{color:var(--ink-3);font-style:italic}
+  .more{font-size:13px;color:var(--ink-3);padding-top:12px}
+  .group{border:1px solid var(--rule);border-radius:8px;margin-bottom:8px;overflow:hidden}
+  .group summary{cursor:pointer;padding:11px 14px;font-size:14px;display:flex;gap:10px;align-items:baseline}
+  .group summary::-webkit-details-marker{display:none}
+  .group summary::before{content:"›";color:var(--ink-3);display:inline-block;transition:transform .12s}
+  .group[open] summary::before{transform:rotate(90deg)}
+  .group summary .n{margin-left:auto;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  .group .gbody{padding:0 14px 12px 26px;font-size:13.5px;color:var(--ink-2)}
+  .leftover h2{color:var(--open)}
+  .said{font-size:14px;color:var(--ink-2);max-width:66ch;margin:8px 0 18px}
+  .gl td:nth-child(2){width:70px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+  .gl .unc{color:var(--open)}
+  .gl .phs{margin-top:4px}.gl .ph{display:inline-block;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);background:var(--canvas);border-radius:4px;padding:1px 6px;margin:2px 4px 0 0}
+  .scope{font-size:12.5px;color:var(--ink-3);margin:24px 0 0;padding-left:18px}
+  @media (max-width:880px){.shell{grid-template-columns:1fr;gap:14px}nav.rail{position:static;display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
+    .railcap{display:none}.rowbtn{width:auto;white-space:nowrap;border:1px solid var(--rule-2);background:var(--paper)}.card{padding:18px 16px}.stats .disclose{margin-left:0}}
 </style></head>
-<body><div class="wrap">
+<body>
+<header class="top"><div class="wrap">
   <h1 id="title"></h1>
-  <p class="source" id="source"></p>
-
-  <section>
-    <div class="sec-h">The processes we found</div>
-    <div class="sec-lead">How the work actually flows. The common way reads loud; the exceptions stay visible but quiet.</div>
-    <div id="procs"></div>
-  </section>
-
-  <section id="vocabSec" hidden>
-    <div class="sec-h">Where each step's name came from</div>
-    <div class="sec-lead">A step's name is a claim like any other. Some are the
-      source's own word; some were grouped and named by a model; some were read out
-      of the record's own text, and those show the words they were read from. Click
-      any row to see only the runs it touched.</div>
-    <table class="vocab"><thead><tr><th>Step</th><th class="num">Records</th>
-      <th>How it got that name</th></tr></thead>
-      <tbody id="vocabRows"></tbody></table>
-  </section>
-
-  <section>
-    <div class="sec-h" id="tableHead"></div>
-    <div class="sec-lead">All of them — not a sample. The buttons are just views of this list; each is exact, and every row opens to its source record.</div>
-    <div class="filters" id="filters"></div>
-    <div class="searchrow"><input id="search" placeholder="Find one by id, owner, or status…"></div>
-    <table><thead><tr><th id="thId">Item</th><th>Process</th><th>Owner</th><th>Path taken</th><th>Differs how</th></tr></thead>
-      <tbody id="rows"></tbody></table>
-    <div class="aside" id="orphanNote"></div>
-  </section>
-
-  <ul class="scope" id="scope"></ul>
+  <p class="lede" id="source"></p>
+  <div class="stats" id="stats"></div>
+</div></header>
+<div class="wrap shell">
+  <nav class="rail" id="rail" aria-label="Processes"></nav>
+  <main id="pane" tabindex="-1"></main>
 </div>
 <script id="data" type="application/json">/*DATA*/</script>
 <script>
 const V = JSON.parse(document.getElementById('data').textContent);
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
-const cap = s => s ? s.charAt(0).toUpperCase()+s.slice(1) : s;
+const M = V.meta, items = M.items, item = M.item;
+const STEPS = Object.fromEntries((V.vocabulary||[]).map(v=>[v.activity, v]));
+const procs = V.processes.filter(p=>!p.leftover && !p.project);
+const projects = V.processes.filter(p=>p.project);
+const leftover = V.processes.find(p=>p.leftover);
+const runsOf = id => V.runs.filter(r=>r.kind_id===id);
 
-document.getElementById('title').textContent = V.meta.title;
-document.getElementById('source').innerHTML = V.meta.corpus + (V.meta.ai_named?' <span class="ai">names suggested by AI</span>':'');
-document.getElementById('tableHead').textContent = 'Every ' + V.meta.item;
-document.getElementById('thId').textContent = cap(V.meta.item);
+document.getElementById('title').textContent = M.title;
+document.getElementById('source').innerHTML = M.corpus + (M.ai_named?' <span class="ai">names suggested by AI</span>':'');
+document.getElementById('stats').innerHTML =
+  `<span><b>${M.n_records}</b> records</span><span><b>${M.n_runs}</b> ${esc(items)}</span>` +
+  `<span><b>${M.n_processes}</b> process${M.n_processes===1?'':'es'}</span>` +
+  (M.n_projects?`<span><b>${M.n_projects}</b> project${M.n_projects===1?'':'s'}</span>`:'') +
+  (leftover?`<button class="disclose" data-go="leftover"><b>${M.n_unplaced}</b> ${esc(items)} not placed ↓</button>`:'');
 
-document.getElementById('procs').innerHTML = V.processes.map(p=>`
-  <div class="proc ${p.flagged?'flagged':''}">
-    <div class="pt">${esc(p.name)}${p.project?' <span class="ptag">project — happened once</span>':''}</div>
-    <div class="pmeta">${p.count} ${esc(V.meta.items)}${p.actors.length?' · '+p.actors.map(esc).join(', '):''}</div>
-    ${p.why?`<div class="pwhy"><b>Why these are one process (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
-    ${p.flow.length?`<div class="plabel">The steps this process is made of, in the order they usually happen</div>
-    <div class="flow">${p.flow.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${esc(s)}</span>`).join('')}</div>`:''}
-    ${p.no_common?`<div class="pnone">No usual way. Every ${esc(V.meta.item)} here took a different path through those steps \u2014 ${p.n_paths} of them, each seen once. All are listed below.</div>`:''}
-    ${p.n_unread?`<div class="pnone">The path above is the steps that were <b>read</b>. ${p.n_unread} of this process\u2019s ${p.n_records} records were declined by the model and keep the source\u2019s own verb, so they are counted here rather than drawn as steps${p.n_runs_unread?` (${p.n_runs_unread} ${esc(p.n_runs_unread===1?V.meta.item:V.meta.items)} had no step read at all)`:''}.</div>`:''}
-    ${p.flagged?`<div class="flag-note"><b>Grouped separately.</b> ${esc(p.flag_note)}</div>`:''}
-    <div class="paths">${p.paths.map(pa=>`
-      <div class="path ${pa.rare?'rare':''}"><span class="cnt">${pa.count}×</span>
-        <div class="bar" style="width:${pa.width}px"></div>
-        <span class="seq">${pa.seq.map(esc).join(' → ')||'—'}${pa.n_traces>1?` <span class="ntr">(${pa.n_traces} exact routes)</span>`:''}</span>
-        <span class="lbl">${esc(pa.label)}</span></div>`).join('')}</div>
-  </div>`).join('');
+let current = (location.hash||'').slice(1) || (procs[0]||projects[0]||{id:'glossary'}).id;
+const rail = document.getElementById('rail'), pane = document.getElementById('pane');
 
-if((V.vocabulary||[]).length){
-  document.getElementById('vocabSec').hidden = false;
-  document.getElementById('vocabRows').innerHTML = V.vocabulary.map(v=>`
-    <tr class="vrow ${v.unclassified?'vunread':''}" data-act="${v.unclassified?'__unread__':esc(v.activity)}">
-      <td><b>${esc(v.activity)}</b>${v.unclassified?'<div class="vnote">kept the source\u2019s own verb \u2014 not read into a step</div>':''}</td>
-      <td class="num">${v.n}</td>
-      <td class="vph">${esc(v.how)}${v.tier?` <span class="tier-tag">${esc(v.tier)}</span>`:''}
-        ${v.phrases.length?`<div class="phs">${v.phrases.map(pp=>`<span class="ph">${esc(pp)}</span>`).join('')}</div>`:''}</td>
-    </tr>`).join('');
+function chip(name){
+  const s = STEPS[name]; const read = s && s.phrases && s.phrases.length;
+  return `<button class="chip" data-step="${esc(name)}" aria-expanded="false"><span class="${read?'u':''}">${esc(name)}</span></button>`;
+}
+const flow = steps => steps.map(chip).join('<span class="arw">→</span>');
+const pathText = p => p.length ? p.map(esc).join(' <span class="arw">→</span> ') : '—';
+
+function renderRail(){
+  const row = (p,cls='') => `<button class="rowbtn ${cls}" data-go="${esc(p.id)}" aria-current="${current===p.id}">${esc(p.name)}<span class="n">${p.count}</span></button>`;
+  let h = `<div class="railcap">Processes</div>` + procs.map(p=>row(p)).join('');
+  if(projects.length) h += `<div class="railcap mt">Projects · happened once</div>` + projects.map(p=>row(p)).join('');
+  h += `<div class="railcap mt">Not process</div>`;
+  if(leftover) h += `<button class="rowbtn quiet" data-go="leftover" aria-current="${current==='leftover'}">Not placed<span class="n">${leftover.count}</span></button>`;
+  h += `<button class="rowbtn quiet" data-go="glossary" aria-current="${current==='glossary'}">Step glossary<span class="n">${(V.vocabulary||[]).length}</span></button>`;
+  rail.innerHTML = h;
 }
 
-const rowsEl=document.getElementById('rows'), filtersEl=document.getElementById('filters');
-let filter='all', q='';
-filtersEl.innerHTML = V.filters.map(f=>
-  `<button class="fbtn ${f.attn?'attn':''} ${f.key==='all'?'on':''}" data-f="${esc(f.key)}">${esc(f.label)} <span class="n">${f.count}</span></button>`).join('');
+// One artefact = one piece of evidence, opening to its source record.
+const art = a => `<div class="ev ${a.inferred?'inf':''}">
+  <span><span class="evref">${esc(a.artefact)}${a.ref?' '+esc(a.ref):''}</span> <span class="evverb">${esc(a.verb)}${a.who?' · '+esc(a.who):''}</span>${a.note?`<div class="quote" style="margin:4px 0 0">${esc(a.note)}</div>`:''}</span>
+  <span class="sm">${esc(a.when)}</span>
+  <span class="src">${a.is_url?`<a href="${esc(a.src)}" target="_blank" rel="noopener">open ↗</a>`:esc(a.src||'—')}</span></div>`;
+
+function detail(r){
+  const frame = M.ai_steps?`<div class="framing"><b>How to read this:</b> each step is what the model read the message as, quoting the line it read; the artefacts beneath are the records, and each opens to its source. A dotted step kept the source's own verb — the model would not commit.</div>`:'';
+  const why = r.why?`<div class="why"><b>Why these are one ${esc(item)} (${esc(r.tier)}):</b> ${esc(r.why)}</div>`:'';
+  const steps = r.activities.map(n=>`<div class="step ${n.unread_step?'unread':''}">
+      <div class="sn">${esc(n.name)}${n.unread_step?' <span class="tag">— not read into a step</span>':''}</div>
+      <div class="sm">${esc(n.when)}${n.sources.length?' · '+n.sources.map(esc).join(' + '):''} · ${n.n} record${n.n===1?'':'s'}</div>
+      ${n.arts.map(art).join('')}</div>`).join('');
+  const inf = r.inferred.length?`<div class="step unread"><div class="sn">Not in any system</div><div class="sm">inferred — never asserted as fact</div>
+      ${r.inferred.map(s=>`<div class="ev inf"><span>${esc(s.name)}</span><span class="sm">${esc(s.when)}</span><span>${esc(s.note||'')}</span></div>`).join('')}</div>`:'';
+  return `<div class="detail">${frame}${why}<div style="margin-top:10px">${steps}${inf}</div></div>`;
+}
+
+function threadTable(rs, withReason){
+  if(!rs.length) return `<p class="more">None.</p>`;
+  const rows = rs.map((r,i)=>`<tr>
+      <td><button class="thread" data-th="${i}" aria-expanded="false"><span class="t">${esc(r.title)}</span>${r.chip_word?`<span class="tchip">${esc(r.chip_word)}</span>`:''}<span class="id">${esc(r.id)}</span></button></td>
+      <td>${esc(r.actor)}</td>
+      <td class="path path1" title="${esc(r.path)}">${esc(r.path)}</td>
+      ${withReason?`<td class="tag" style="white-space:normal">${esc(r.reason||'')}</td>`:`<td class="tag">${esc(r.dev_label)}</td>`}</tr>
+      <tr class="det" data-for="${i}" hidden><td colspan="4">${detail(r)}</td></tr>`).join('');
+  return `<input class="search" placeholder="Find one by id, owner, or title…" data-search>
+    <table><thead><tr><th>${esc(item[0].toUpperCase()+item.slice(1))}</th><th>Owner</th><th>Path taken</th><th>${withReason?'Why it stayed out':'Differs how'}</th></tr></thead><tbody data-tbody>${rows}</tbody></table>`;
+}
+
+function renderNode(p){
+  const rs = runsOf(p.id);
+  const usual = p.paths.find(x=>x.label==='most common');
+  const tags = ['All '+p.paths.length, ...new Set(p.paths.map(x=>x.label).filter(Boolean).map(t=>t[0].toUpperCase()+t.slice(1)))];
+  const routes = p.paths.map(x=>`<tr data-tag="${esc(x.label)}"><td>${x.count}×</td>
+      <td class="path">${pathText(x.seq)}${x.n_traces>1?` <span class="tag">(${x.n_traces} exact routes)</span>`:''}</td>
+      <td class="tag ${x.label==='most common'?'common':''}" style="text-align:right">${esc(x.label)}</td></tr>`).join('');
+  return `<div class="card">
+    <h2>${esc(p.name)}${p.project?'<span class="ptag">project — happened once</span>':''}</h2>
+    <p class="sub">${p.count} ${esc(items)} · ${p.n_records} records · ${p.n_records-p.n_unread} read into a step</p>
+    ${p.actors.length?`<p class="who">${p.actors.map(esc).join('  ')}</p>`:''}
+    ${p.why?`<div class="why"><b>Why these are one ${p.project?'project':'process'} (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
+    <div class="band">
+      <div class="bandhead"><h3>The steps, in the order they usually happen</h3></div>
+      ${p.flow.length?`<div class="flow">${flow(p.flow)}</div>
+      <p class="legend">Dotted underline: the name was read from the records' own words. Click any step for those words.</p>`:`<p class="legend">No step in this ${esc(item)} was read.</p>`}
+      <div data-prov></div>
+    </div>
+    <div class="band">
+      <div class="bandhead"><h3>Routes taken</h3>
+        <span class="note">${p.no_common?`No usual way — every ${esc(item)} took a different route through those steps`:usual?`${usual.count} of ${p.count} ${esc(items)} follow the usual way`:''}${p.n_unread?` · ${p.n_unread} of ${p.n_records} records not read, counted here rather than drawn as steps`:''}</span></div>
+      ${p.paths.length?`<div class="filters" data-rfilters>${tags.map((t,i)=>`<button class="fchip" aria-pressed="${i===0}" data-f="${esc(t)}">${esc(t)}</button>`).join('')}</div>
+      <table class="runs"><tbody data-rbody>${routes}</tbody></table>`:`<p class="more">No route was read.</p>`}
+    </div>
+    <div class="band">
+      <div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>
+      ${threadTable(rs,false)}
+    </div>
+    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
+  </div>`;
+}
+
+function renderLeftover(){
+  const p = leftover, rs = runsOf(p.id);
+  const groups = {};
+  rs.forEach(r=>{ (groups[r.reason||'—'] ||= []).push(r); });
+  const orph = V.orphans.length?`<p class="said"><b>${V.orphans.length}</b> record${V.orphans.length===1?'':'s'} matched no ${esc(item)} at all (e.g. <code>${esc(V.orphans[0].src)}</code> — ${esc(V.orphans[0].reason)}) — set aside, not counted.</p>`:'';
+  return `<div class="card leftover">
+    <h2>Not read into any process — ${p.count} ${esc(items)}</h2>
+    <p class="said">Nothing in here is a finding. It is the part of the records that isn't process — and the size of it is how much to trust the processes on the left. Nothing here is guessed: ${p.n_unread} of these ${p.n_records} records kept the source's own verb because the model would not commit to what they did.</p>
+    ${p.actors.length?`<p class="who">${p.actors.map(esc).join('  ')}</p>`:''}
+    <div class="band"><div class="bandhead"><h3>Why each one stayed out</h3></div>
+      ${Object.entries(groups).sort((a,b)=>b[1].length-a[1].length).map(([g,list])=>`<details class="group"><summary>${esc(g)}<span class="n">${list.length}</span></summary><div class="gbody">${list.map(r=>esc(r.title)).join(' · ')}</div></details>`).join('')}
+    </div>
+    ${orph}
+    <div class="band"><div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>${threadTable(rs,true)}</div>
+    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
+  </div>`;
+}
+
+function renderGlossary(){
+  const rows = (V.vocabulary||[]).map(v=>`<tr class="${v.unclassified?'unc':''}"><td class="${v.unclassified?'unc':''}">${esc(v.activity)}</td><td>${v.n}</td>
+    <td>${esc(v.how)}${v.tier?` <span class="tag">${esc(v.tier)}</span>`:''}${v.phrases&&v.phrases.length?`<div class="phs">${v.phrases.map(q=>`<span class="ph">${esc(q)}</span>`).join('')}</div>`:''}</td></tr>`).join('');
+  return `<div class="card"><h2>Step glossary</h2>
+    <p class="sub">Where each step's name came from. A step's name is a claim like any other — some are the source's own word, some were grouped and named by a model, some were read out of the record's text and show the words they were read from.</p>
+    <div class="band"><table class="gl"><thead><tr><th>Step</th><th>Records</th><th>How it got that name</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>`;
+}
 
 function render(){
-  const list = V.runs.filter(r=>{
-    if(filter.startsWith('kind:')){ if(r.kind_id!==filter.slice(5)) return false; }
-    else if(filter==='act:__unread__'){ if(!r.unread) return false; }
-    else if(filter.startsWith('act:')){
-      const want=filter.slice(4);
-      if(!r.activities.some(n=>n.name===want)) return false;
-    }
-    else if(filter!=='all' && r.dev_key!==filter) return false;
-    if(q && !((r.id+' '+r.title+' '+r.actor+' '+r.status+' '+r.kind).toLowerCase().includes(q))) return false;
-    return true;
-  });
-  // one artefact = one piece of evidence, traceable to its source record
-  const art = a=>`<div class="ev ${a.inferred?'inf':''}">
-      <span class="en"><span class="evref">${esc(a.artefact)}${a.ref?' '+esc(a.ref):''}</span><span class="evverb">${esc(a.verb)}${a.who?' · '+esc(a.who):''}</span></span>
-      <span class="ed">${esc(a.when)}</span>
-      <span class="src">${a.is_url?`<a href="${esc(a.src)}" target="_blank" rel="noopener">open ↗</a>`:esc(a.src||'—')}</span></div>`;
-  rowsEl.innerHTML = list.map((r,i)=>{
-    // the spine is the INFERRED activities (the steps); each artefact beneath is
-    // the recorded evidence that step is inferred from, and it opens to its source.
-    const acts = r.activities.map(n=>`<div class="actnode">
-        <div class="acth"><span class="actn">${esc(n.name)}</span><span class="actm">${esc(n.when)}${n.sources.length?' · '+n.sources.map(esc).join(' + '):''}</span></div>
-        <div class="evlabel">evidenced by ${n.n} artefact${n.n===1?'':'s'}</div>
-        <div class="arts">${n.arts.map(art).join('')}</div></div>`).join('');
-    const inf = r.inferred.length?`<div class="actnode inf">
-        <div class="acth"><span class="actn">Not in any system</span><span class="actm">inferred — never asserted as fact</span></div>
-        <div class="arts">${r.inferred.map(s=>`<div class="ev inf"><span class="en"><span class="evref">${esc(s.name)}</span><span class="evverb">inferred, no record</span></span><span class="ed">${esc(s.when)}${s.note?' — '+esc(s.note):''}</span><span class="src">${s.src?esc(s.src):'—'}</span></div>`).join('')}</div></div>`:'';
-    const chip = r.chip_word?` <span class="tchip ${esc(r.chip_class)}">${esc(r.chip_word)}</span>`:'';
-    const xchip = r.cross?` <span class="xchip">${r.sources.map(esc).join(' + ')}</span>`:'';
-    const frame = V.meta.ai_steps?`<div class="framing"><b>How to read this:</b> the steps are the activities the model inferred by grouping the artefacts below; each artefact is the recorded evidence, and <b>opens to its source</b>. Anything the systems never recorded shows as <i>inferred</i>.</div>`:'';
-    return `<tr class="run" data-i="${i}"><td><div class="rtitle">${esc(r.title)}</div>
-          <div class="rsub">${esc(r.id)}${chip}${xchip}</div></td>
-        <td><span class="kind ${r.kind_attn?'flag':''}">${esc(r.kind)}</span></td><td>${esc(r.actor)}</td>
-        <td class="path-c">${esc(r.path)}</td>
-        <td><span class="dev ${r.dev_attn?'attn':''}">${esc(r.dev_label)}</span></td></tr>
-      <tr class="detail" id="d${i}" hidden><td colspan="5">
-        <div class="tl"><div class="tlh">${esc(r.id)} · ${esc(r.status)}</div>${frame}
-          ${r.why?`<div class="why"><b>Why these are one ${esc(V.meta.item)} (${esc(r.tier)}):</b> ${esc(r.why)}</div>`:''}${acts}${inf}</div></td></tr>`;
-  }).join('') || `<tr><td colspan="5" style="text-align:center;color:var(--ink-3);padding:22px">None match.</td></tr>`;
-  rowsEl.querySelectorAll('tr.run').forEach(tr=>tr.onclick=()=>{
-    const d=document.getElementById('d'+tr.dataset.i); d.hidden=!d.hidden;});
+  renderRail();
+  if(current==='leftover' && leftover) pane.innerHTML = renderLeftover();
+  else if(current==='glossary') pane.innerHTML = renderGlossary();
+  else { const p = V.processes.find(x=>x.id===current) || procs[0] || projects[0]; if(!p){ current='glossary'; return render(); } pane.innerHTML = renderNode(p); }
+  wire();
 }
-document.getElementById('search').addEventListener('input',e=>{q=e.target.value.toLowerCase();render();});
-filtersEl.querySelectorAll('.fbtn').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.vrow.on').forEach(x=>x.classList.remove('on'));
-  filtersEl.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on'));
-  b.classList.add('on'); filter=b.dataset.f; render();});
-
-// Clicking a step in the audit table filters the run list to the runs it touched
-// — the point of the table is that the reading can be checked, not just totalled.
-document.querySelectorAll('.vrow').forEach(tr=>tr.onclick=()=>{
-  const key='act:'+tr.dataset.act, already=tr.classList.contains('on');
-  document.querySelectorAll('.vrow.on').forEach(x=>x.classList.remove('on'));
-  filtersEl.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('on'));
-  if(already){ filter='all'; filtersEl.querySelector('.fbtn').classList.add('on'); }
-  else { filter=key; tr.classList.add('on');
-         document.getElementById('tableHead').scrollIntoView({behavior:'smooth',block:'start'}); }
-  render();});
-
-document.getElementById('orphanNote').innerHTML = V.orphans.length
-  ? `<b>${V.orphans.length}</b> record${V.orphans.length===1?'':'s'} could not be matched to any ${esc(V.meta.item)} (e.g. <code>${esc(V.orphans[0].src)}</code> — ${esc(V.orphans[0].reason)}) — set aside, not counted.`
-  : '';
-document.getElementById('scope').innerHTML = V.meta.scope.map(s=>`<li>${esc(s)}</li>`).join('');
+function wire(){
+  document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{ current=b.dataset.go; location.hash=current; render(); pane.focus(); });
+  const prov = pane.querySelector('[data-prov]');
+  pane.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{
+    const open = c.getAttribute('aria-expanded')==='true';
+    pane.querySelectorAll('.chip').forEach(x=>x.setAttribute('aria-expanded','false'));
+    if(open){ prov.innerHTML=''; return; }
+    c.setAttribute('aria-expanded','true');
+    const s = STEPS[c.dataset.step] || {how:'—', phrases:[], n:0};
+    prov.innerHTML = `<div class="prov"><h4>${esc(c.dataset.step)}</h4><p class="how">${esc(s.how)} · ${s.n} record${s.n===1?'':'s'}</p>
+      ${(s.phrases||[]).map(q=>`<div class="quote">${esc(q)}</div>`).join('') || '<p class="how">No quoted span — this name was not read from a record.</p>'}
+      <p class="provfoot">Every reading opens to the record it came from — expand a ${esc(item)} below.</p></div>`;
+  });
+  const rf = pane.querySelector('[data-rfilters]');
+  if(rf) rf.querySelectorAll('.fchip').forEach(b=>b.onclick=()=>{
+    rf.querySelectorAll('.fchip').forEach(x=>x.setAttribute('aria-pressed','false')); b.setAttribute('aria-pressed','true');
+    const f=b.dataset.f.toLowerCase();
+    pane.querySelectorAll('[data-rbody] tr').forEach(tr=>{ tr.hidden = !(f.startsWith('all') || tr.dataset.tag.toLowerCase()===f); });
+  });
+  pane.querySelectorAll('.thread').forEach(b=>b.onclick=()=>{
+    const i=b.dataset.th, det=pane.querySelector(`tr.det[data-for="${i}"]`);
+    det.hidden=!det.hidden; b.setAttribute('aria-expanded', String(!det.hidden)); b.closest('tr').classList.toggle('open', !det.hidden);
+  });
+  const sb = pane.querySelector('[data-search]');
+  if(sb) sb.oninput = e=>{ const q=e.target.value.toLowerCase();
+    pane.querySelectorAll('[data-tbody] tr:not(.det)').forEach(tr=>{
+      const hit = !q || tr.textContent.toLowerCase().includes(q); tr.hidden=!hit;
+      const det = tr.nextElementSibling; if(det && det.classList.contains('det') && !hit) det.hidden=true; }); };
+}
+window.addEventListener('hashchange',()=>{ const h=location.hash.slice(1); if(h && h!==current){ current=h; render(); } });
 render();
 </script>
 </body></html>"""

@@ -384,12 +384,21 @@ class RecordClassifier:
     def discover(self, samples: list[str]) -> ReadVocabulary:
         raise NotImplementedError
 
-    def classify(self, records: list[dict], vocabulary: ReadVocabulary) -> dict[str, dict]:
-        """``[{"id","text"}]`` -> ``{id: {"activity","process","span"}}``.
+    def classify_threads(self, threads: list[dict], vocabulary: ReadVocabulary) -> dict[str, dict]:
+        """``[{"id", "records": [{"id","text"}, ...]}]`` ->
+        ``{thread_id: {"process": <name>, "steps": {record_id: {"step","span"}}}}``.
 
-        A record the classifier will not commit to must be OMITTED, not guessed
-        at. `process` may be omitted on its own — a record can plainly perform an
-        activity while belonging to no family the sample named.
+        THE UNIT IS THE RUN, NOT THE RECORD. A process is a property of a thread;
+        a single reply ("yes you are", "looks good — go get 'em") rarely says
+        which process it is in and often does not even say what it did, yet in
+        sequence both are obvious. Classifying one message at a time held
+        abstention at ~60% across four different label vocabularies — the label
+        form was never the cause; the missing context was.
+
+        So the classifier sees the whole run in order and answers once for the
+        process, then once per record for the step (from THAT process's list,
+        with the quoted span) — or omits the record. A thread it cannot place
+        must be OMITTED, not guessed at.
         """
         raise NotImplementedError
 
@@ -607,9 +616,11 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
     if not records:
         return
 
+    distinct, capped = _cap_per_thread(records, m)
     log(f"abstraction: verbs are transport, reading {len(records)} records "
-        f"(discovering the vocabulary from a sample of {min(len(records), _DISCOVERY_SAMPLE)})")
-    sample = [r["text"] for r in _spread(records, _DISCOVERY_SAMPLE)]
+        f"(discovering the vocabulary from a sample of {min(len(distinct), _DISCOVERY_SAMPLE)}"
+        + (f"; {capped} records held back so no one thread floods it" if capped else "") + ")")
+    sample = [r["text"] for r in _spread(distinct, _DISCOVERY_SAMPLE)]
     try:
         vocab = classifier.discover(sample)
     except Exception as e:                # the tier is a convenience, never a blocker
@@ -627,23 +638,39 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
             f"({activities or 'none'}) — nothing to classify into, so the steps "
             f"stay as the source's own verbs")
         return
-    n_batches = (len(records) + _CLASSIFY_BATCH - 1) // _CLASSIFY_BATCH
-    log(f"abstraction: reading {len(records)} records into {len(processes)} processes "
-        f"and {len(activities)} steps — {n_batches} batch(es)")
+    # The unit of classification is the RUN. Pack whole threads into batches;
+    # a thread is never split across calls, because the context is the point.
+    by_id = {r["id"]: r for r in records}
+    threads = []
+    for case in m.cases.values():
+        recs = [by_id[eid] for eid in case.ordered_event_ids if eid in by_id]
+        if recs:
+            threads.append({"id": case.id, "records": recs})
+    batches: list[list[dict]] = [[]]
+    for th in threads:
+        if batches[-1] and sum(len(t["records"]) for t in batches[-1]) + len(th["records"]) > _CLASSIFY_BATCH:
+            batches.append([])
+        batches[-1].append(th)
+    n_batches = len(batches)
+    log(f"abstraction: reading {len(records)} records in {len(threads)} threads into "
+        f"{len(processes)} processes and {len(activities)} steps — {n_batches} batch(es)")
     for name in processes:
         log(f"abstraction:   {name} — " + " → ".join(vocab.steps_by_process[name]))
     if vocab.loose:
         log(f"abstraction:   (belonging to no process: {', '.join(vocab.loose)})")
 
     got: dict[str, dict] = {}
-    for i in range(0, len(records), _CLASSIFY_BATCH):
-        batch = records[i:i + _CLASSIFY_BATCH]
-        b = i // _CLASSIFY_BATCH + 1
-        log(f"abstraction: classifying batch {b}/{n_batches} ({len(batch)} records)")
+    for b, batch in enumerate(batches, 1):
+        n_rec = sum(len(t["records"]) for t in batch)
+        log(f"abstraction: classifying batch {b}/{n_batches} ({len(batch)} threads, {n_rec} records)")
         try:
-            got.update(_clean_readings(classifier.classify(batch, vocab), batch, vocab))
+            got.update(_clean_thread_readings(classifier.classify_threads(batch, vocab), batch, vocab))
         except Exception as e:
             log(f"[abstraction] batch {b} skipped ({type(e).__name__}: {e})")
+
+    for proc, step, n in _detach_lonely_steps(got, m, vocab):
+        log(f"[abstraction] detached {step!r} from {proc}: seen in {n} records across "
+            f"3+ runs and never alongside another step of that process — not a stage")
 
     abstraction.by_record = got
     abstraction.processes = processes
@@ -694,6 +721,94 @@ def _clean_readings(raw: dict, batch: list[dict], vocab: "ReadVocabulary") -> di
     return out
 
 
+def _clean_thread_readings(raw: dict, threads: list[dict],
+                           vocab: "ReadVocabulary") -> dict[str, dict]:
+    """Unpack a thread-level reply into per-record readings, enforcing the thread's
+    process on every step. Delegates each record to `_clean_readings`, so the
+    record-level guardrail is the only guardrail: an unknown thread id, a process
+    not on the list, a step from a different process, a missing span — dropped."""
+    by_thread = {th["id"]: th for th in threads}
+    out: dict[str, dict] = {}
+    for tid, val in (raw or {}).items():
+        th = by_thread.get(tid)
+        if th is None or not isinstance(val, dict):
+            continue
+        process = str(val.get("process") or "").strip()
+        steps = val.get("steps")
+        if not isinstance(steps, dict):
+            continue
+        # every record in this thread is claimed for the thread's process
+        per_record = {rid: {"process": process, "step": (v or {}).get("step"),
+                            "span": (v or {}).get("span")}
+                      for rid, v in steps.items() if isinstance(v, dict)}
+        out.update(_clean_readings(per_record, th["records"], vocab))
+    return out
+
+
+def _detach_lonely_steps(got: dict[str, dict], m, vocab: "ReadVocabulary",
+                         min_runs: int = 3) -> list[tuple[str, str, int]]:
+    """A step that appears in `min_runs`+ runs and NEVER alongside another step of
+    its process is not a step of that process. Detach it: its records go back to
+    declined. Returns what was detached, for the log.
+
+    "Promotion to Managing Director" appeared in three runs of Research Group
+    Staffing and in none of them next to Resume reviewed, Intern placed or Offer
+    extended — because those three runs were people saying congratulations. A
+    real stage co-occurs with its siblings in at least some runs; a burst of
+    look-alike noise the model dressed as a stage never does. Arithmetic over
+    the readings; no model is asked.
+    """
+    from collections import defaultdict
+    runs_of: dict[tuple, set] = defaultdict(set)         # (process, step) -> case ids
+    steps_in_run: dict[tuple, set] = defaultdict(set)    # (process, case) -> steps
+    for case in m.cases.values():
+        for eid in case.event_ids:
+            r = got.get(eid)
+            if r and r.get("process"):
+                key = (r["process"], r["activity"])
+                runs_of[key].add(case.id)
+                steps_in_run[(r["process"], case.id)].add(r["activity"])
+    detached = []
+    for (proc, step), cids in runs_of.items():
+        if len(cids) < min_runs:
+            continue
+        if any(len(steps_in_run[(proc, cid)]) > 1 for cid in cids):
+            continue                                     # co-occurs somewhere: a stage
+        n = 0
+        for eid, r in list(got.items()):
+            if r.get("process") == proc and r["activity"] == step:
+                del got[eid]
+                n += 1
+        if step in vocab.steps_by_process.get(proc, []):
+            vocab.steps_by_process[proc].remove(step)
+        detached.append((proc, step, n))
+    return detached
+
+
+def _cap_per_thread(records: list[dict], m, per_thread: int = 3) -> tuple[list[dict], int]:
+    """At most `per_thread` records from any one run go into the discovery sample.
+    Returns (kept, dropped).
+
+    A 19-message thread of people saying congratulations put ~11 records into a
+    150-record sample, and a model asked what RECURS found the thing that
+    recurred most. Text dedup does not catch it — those mails share a thread, not
+    wording. The bias is structural: one run flooding the sample. So the cap is
+    structural too. A run of nineteen is one instance of one thing and gets
+    three voices, not eleven; a daily log or a long negotiation is treated the
+    same way, whatever its subject.
+    """
+    case_of = {eid: cid for cid, c in m.cases.items() for eid in c.event_ids}
+    taken: dict = {}
+    kept: list[dict] = []
+    for r in records:
+        cid = case_of.get(r["id"], r["id"])
+        if taken.get(cid, 0) >= per_thread:
+            continue
+        taken[cid] = taken.get(cid, 0) + 1
+        kept.append(r)
+    return kept, len(records) - len(kept)
+
+
 def _audit_rows(vocabulary: list[str], readings: dict, n_unclassified: int) -> list[dict]:
     """The audit view: every activity, how many records it claimed, and the
     phrases it was read from. The `Unclassified` row is the trust number — if it
@@ -741,17 +856,32 @@ class ScriptedRecordClassifier(RecordClassifier):
                 bucket.append(name)
         return ReadVocabulary(steps_by_process=by_process, loose=loose)
 
-    def classify(self, records: list[dict], vocabulary: "ReadVocabulary") -> dict[str, dict]:
-        out = {}
-        for rec in records:
-            low = rec["text"].lower()
-            for name, phrases, process in self._rules:
-                hit = next((p for p in phrases if p in low), None)
-                if hit:
-                    out[rec["id"]] = {"activity": name, "span": hit}
-                    if process:
-                        out[rec["id"]]["process"] = process
-                    break
+    def classify_threads(self, threads: list[dict], vocabulary: "ReadVocabulary") -> dict[str, dict]:
+        """Rules fire per record as before; the thread's process is the plurality
+        of what its records matched — the same arithmetic the engine does, so the
+        stand-in exercises the real path without pretending to read context."""
+        from collections import Counter
+        out: dict[str, dict] = {}
+        for th in threads:
+            steps: dict[str, dict] = {}
+            votes: Counter = Counter()
+            for rec in th["records"]:
+                low = rec["text"].lower()
+                for name, phrases, process in self._rules:
+                    hit = next((p for p in phrases if p in low), None)
+                    if hit:
+                        steps[rec["id"]] = {"step": name, "span": hit, "_process": process}
+                        if process:
+                            votes[process] += 1
+                        break
+            if not steps:
+                continue
+            process = votes.most_common(1)[0][0] if votes else None
+            # a record whose rule belongs to a different process is left to the
+            # guardrail, exactly as a real reply would be
+            out[th["id"]] = {"process": process,
+                             "steps": {rid: {"step": v["step"], "span": v["span"]}
+                                       for rid, v in steps.items()}}
         return out
 
 
@@ -810,18 +940,21 @@ class AnthropicRecordClassifier(RecordClassifier):
         '"steps": ["<Step>", ...]}, ...]}'
     )
     _CLASSIFY_SYSTEM = (
-        "You are given process definitions — each process with its own steps — and a "
-        "batch of records. For each record decide, in this order:\n"
-        "  1. which PROCESS it belongs to, if any;\n"
-        "  2. which of THAT PROCESS'S steps it performs;\n"
-        "  3. the span of the record's own text that justifies the step.\n"
-        "A step may only come from the steps listed under the process you chose. "
-        "Never mix a step from one process into another, and never invent one.\n"
-        "If a record belongs to no process on the list, or performs none of that "
-        "process's steps, OMIT the record entirely. Omission is correct and expected; "
-        "a guess is not. Return ONLY JSON: "
-        '{"<record id>": {"process": "<Process>", "step": "<Step>", '
-        '"span": "<quoted text>"}}'
+        "You are given process definitions — each process with its own steps — and "
+        "several THREADS, each a run of work shown as its messages in time order. For "
+        "each thread decide, in this order:\n"
+        "  1. which ONE process the thread is a run of — read the whole thread; the "
+        "process is a property of the conversation, not of any single message;\n"
+        "  2. for each message, which of THAT process's steps it performs, and the span "
+        "of the message's own text that justifies it. Use the surrounding messages: a "
+        "one-line reply means what the question before it makes it mean.\n"
+        "A step may only come from the process you chose for the thread. Never mix in "
+        "a step from another process, and never invent one. Omit a message that "
+        "performs no step (a thanks, a pure forward, a greeting). Omit a whole thread "
+        "that is not a run of any process on the list — social mail is not a process. "
+        "Omission is correct and expected; a guess is not. Return ONLY JSON: "
+        '{"<thread id>": {"process": "<Process>", "steps": {"<message id>": '
+        '{"step": "<Step>", "span": "<quoted text>"}}}}'
     )
 
     def __init__(self, api_model: Optional[str] = None, log=None):
@@ -875,7 +1008,7 @@ class AnthropicRecordClassifier(RecordClassifier):
                       f"the model's reply, which was: {raw[:300]!r}")
         return vocab
 
-    def classify(self, records: list[dict], vocabulary: ReadVocabulary) -> dict[str, dict]:
+    def classify_threads(self, threads: list[dict], vocabulary: ReadVocabulary) -> dict[str, dict]:
         ask = "Processes and their steps:\n" + json.dumps(
             [{"name": name, "steps": steps}
              for name, steps in vocabulary.steps_by_process.items()], indent=1)
@@ -885,8 +1018,8 @@ class AnthropicRecordClassifier(RecordClassifier):
         got, _ = self._call(
             self._CLASSIFY_SYSTEM,
             ask
-            + "\n\nRecords:\n" + json.dumps(records, indent=1)
-            + "\n\nReturn the JSON. Omit any record you are not sure about.",
+            + "\n\nThreads:\n" + json.dumps(threads, indent=1)
+            + "\n\nReturn the JSON. Omit any message or thread you are not sure about.",
             max_tokens=_CLASSIFY_TOKENS)
         return got if isinstance(got, dict) else {}
 
