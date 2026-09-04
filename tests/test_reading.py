@@ -197,3 +197,179 @@ def test_a_bare_dict_is_still_a_tier_one_abstraction():
     a = Abstraction.of({"email/sent": "Raised"})
     assert a.activity_of("evt:1", "email", "sent") == "Raised"
     assert a.span_of("evt:1") is None
+
+
+# --- the processes, read from the records rather than the envelope -----------
+#
+# The steps were only half the problem. Kinds were clustered on
+# `(automated, case.kind_hint)`, which for a mailbox is `(False, 'email')` for
+# every run in the corpus — one kind, always, whatever the mail was about. The
+# fallback was token overlap over pooled thread text, and on the repo's own Enron
+# sample it produced kinds called `shirley, shall, time` and `hey, ena, work`.
+#
+# So the reading tier now derives a second vocabulary — the process families the
+# corpus is a record of — and the segmenter clusters on THAT. These pin the two
+# halves of the guarantee: the boundary is drawn by the engine (a count over each
+# run's own records), and it is drawn only where the records support it.
+
+FAMILY_CLASSIFIER = ScriptedRecordClassifier([
+    ("Requested", ["please review the credit terms"], "Contract execution"),
+    ("Reviewed", ["look fine from our side"], "Contract execution"),
+    ("Approved", ["approved - proceed"], "Contract execution"),
+    ("Executed", ["executed and filed"], "Contract execution"),
+    ("Chased", ["remains unpaid"], "Invoice dispute"),
+    ("Disputed", ["we dispute this charge"], "Invoice dispute"),
+    ("Settled", ["settled in full"], "Invoice dispute"),
+    ("Onboarded", ["vendor pack returned"], "Vendor onboarding"),
+])
+
+
+def _families_corpus():
+    """14 contract runs, 12 invoice disputes, 2 vendor onboardings (below the
+    floor) and 10 unreadable one-offs.
+
+    Every run has the identical structural shape — `(human, email_thread)` — so
+    the structural key cannot separate a contract from an unpaid invoice, which
+    is the whole situation the reading tier exists for. Threads are the length
+    real ones are (a step gets chased, a reviewer answers twice), so the corpus
+    clears the transport gate on its own verbs rather than on a fixture that was
+    tuned until it did.
+    """
+    msgs, n = [], [0]
+
+    def m(frm, subject, body, day, thread=None):
+        n[0] += 1
+        mid = f"f{n[0]}"
+        msgs.append(_mail(mid, frm, subject, body, day, thread))
+        return mid
+
+    for i in range(14):
+        day = i % 28 + 1
+        root = m("a.okonkwo", f"Master agreement - CP{i}",
+                 f"Please review the credit terms on CP{i}.", day)
+        m("l.bergstrom", f"RE: Master agreement - CP{i}",
+          f"Credit terms look fine from our side on CP{i}.", day, root)
+        m("d.acheampong", f"RE: Master agreement - CP{i}",
+          f"Second pass - credit terms look fine from our side, CP{i}.", day, root)
+        m("p.varga", f"RE: Master agreement - CP{i}",
+          f"Approved - proceed to execution for CP{i}.", day, root)
+        m("a.okonkwo", f"RE: Master agreement - CP{i}",
+          f"Executed and filed for CP{i}.", day, root)
+
+    for i in range(12):
+        day = i % 28 + 1
+        root = m("t.mbeki", f"Invoice 90{i}", f"Invoice 90{i} remains unpaid.", day)
+        m("s.haddad", f"RE: Invoice 90{i}",
+          f"We dispute this charge on invoice 90{i}.", day, root)
+        m("t.mbeki", f"RE: Invoice 90{i}",
+          f"Second notice - invoice 90{i} remains unpaid.", day, root)
+        m("s.haddad", f"RE: Invoice 90{i}", f"Settled in full for 90{i}.", day, root)
+
+    for i in range(2):
+        root = m("k.novak", f"Vendor pack {i}", f"Vendor pack returned for {i}.", i + 1)
+        m("k.novak", f"RE: Vendor pack {i}", f"Vendor pack returned, countersigned {i}.",
+          i + 1, root)
+
+    odd = "parking badge printer stapler kettle lanyard mug bicycle locker fridge".split()
+    for i in range(10):
+        m("r.deniz", f"{odd[i].title()} note {i}", f"{odd[i]} {odd[(i + 3) % 10]} {i}", i + 1)
+    return msgs
+
+
+@pytest.fixture(scope="module")
+def families():
+    m = induce(email_mbox.shape(_families_corpus(), "meridian"), slug="meridian")
+    structural = [k.name for k in m.kinds]
+    abstraction = infer_activities(m, mapper=None, classifier=FAMILY_CLASSIFIER)
+    return m, abstraction, build_view(m, activities=abstraction), structural
+
+
+def test_before_reading_the_kinds_are_named_after_vocabulary_not_work(families):
+    """The premise, and the thing being replaced.
+
+    Every run here is `(human, email_thread)`, so the structural key yields one
+    undifferentiated cluster and the token fallback takes over. It does separate
+    this clean synthetic corpus — and names the results after whichever words
+    happened to be rare, which is the failure the real Enron sample makes
+    unmissable (`shirley, shall, time`). Shared vocabulary is not shared work,
+    and no reader can act on a process called `agreement, approved, cp`.
+    """
+    _, _, _, structural = families
+    assert any("," in name for name in structural), structural
+    assert not any(name in ("Contract execution", "Invoice dispute")
+                   for name in structural)
+
+
+def test_reading_the_records_finds_the_real_processes(families):
+    m, _, view, _ = families
+    named = {p["name"]: p["count"] for p in view["processes"]}
+    assert named.get("Contract execution") == 14
+    assert named.get("Invoice dispute") == 12
+
+
+def test_each_process_has_the_steps_its_records_evidence(families):
+    _, _, view, _ = families
+    flow = {p["name"]: p["flow"] for p in view["processes"]}
+    # The second reviewer folds into one Reviewed step; the second chase does not
+    # fold, because it is not adjacent to the first.
+    assert flow["Contract execution"] == ["Requested", "Reviewed", "Approved", "Executed"]
+    assert flow["Invoice dispute"] == ["Chased", "Disputed", "Chased", "Settled"]
+
+
+def test_a_read_boundary_says_it_is_model_tier_and_why(families):
+    """A kind boundary is an inference like any other. Read from the records it
+    is `model`, and the card must say the engine counted rather than the model
+    decided."""
+    m, _, view, _ = families
+    kind = next(k for k in m.kinds if k.name == "Contract execution")
+    assert kind.confidence.tier.label == "model"
+    assert "read from its records" in kind.confidence.rationale
+    card = next(p for p in view["processes"] if p["name"] == "Contract execution")
+    assert card["tier"] == "model" and "count" in card["why"]
+
+
+def test_a_family_below_the_floor_is_not_a_kind(families):
+    """2 runs is over-splitting, not a rare process — the reading proposes
+    families from a sample, so a family of one or two folds back into the parent
+    rather than becoming a card."""
+    _, _, view, _ = families
+    assert "Vendor onboarding" not in {p["name"] for p in view["processes"]}
+
+
+def test_runs_the_reading_declined_stay_in_the_structural_kind(families):
+    """The 10 one-offs match no rule at all, and the 2 vendor runs belong to a
+    family too small to be a kind. Neither is forced into a process nothing
+    evidenced — they keep an unnamed structural kind."""
+    m, abstraction, _, _ = families
+    unplaced = [c for c in m.cases if c not in set(abstraction.by_case)]
+    assert len(unplaced) == 10
+    read_kinds = {k.id for k in m.kinds if k.features.get("read_process")}
+    leftovers = unplaced + [cid for cid, p in abstraction.by_case.items()
+                            if p == "Vendor onboarding"]
+    assert len(leftovers) == 12
+    for cid in leftovers:
+        owner = next(k for k in m.kinds if cid in k.case_ids)
+        assert owner.id not in read_kinds
+
+
+def test_a_runs_process_is_a_count_over_its_own_records(families):
+    """The engine places the run; the model only named the families. A thread
+    whose records mostly read as one family lands there, and the placement is
+    reproducible from `by_record` alone."""
+    from collections import Counter
+    m, abstraction, _, _ = families
+    for cid, process in abstraction.by_case.items():
+        votes = Counter(abstraction.process_of(e) for e in m.cases[cid].ordered_event_ids)
+        votes.pop(None, None)
+        assert votes and process == max(votes, key=votes.get)
+
+
+def test_no_process_vocabulary_leaves_segmentation_alone(families):
+    """The old classifier proposes activities and no families. Steps must still
+    be read, and the kinds must stay exactly as structure left them."""
+    m = induce(email_mbox.shape(_families_corpus(), "meridian"), slug="meridian")
+    before = [k.name for k in m.kinds]
+    abstraction = infer_activities(m, mapper=None, classifier=CLASSIFIER)
+    assert abstraction.by_record            # steps were still read
+    assert abstraction.by_case == {}        # but nothing was re-segmented
+    assert [k.name for k in m.kinds] == before

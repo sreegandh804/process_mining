@@ -108,8 +108,11 @@ def _run_detected(args, tier: ModelTier, prog: Progress) -> int:
 
     m = run_tabular_pipeline([(found.spec, path)], slug=path.stem,
                              profile=GENERIC_PROFILE, max_cases=args.max_cases, progress=prog)
-    names = infer_names(m, enable=tier.names_enable(), log=prog)
+    # Abstraction runs BEFORE naming: reading the records can re-segment the
+    # corpus (`abstraction._reproject`), and a namer that ran first would hand
+    # back names keyed on kind ids that no longer mean the same thing.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
     html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)
@@ -168,8 +171,11 @@ def main(argv=None) -> int:
           f"· model tier: {tier.label} ...")
     m = run_tabular_pipeline(sources, slug=slug, profile=profile, progress=prog)
 
-    names = infer_names(m, enable=tier.names_enable(), log=prog)
+    # Abstraction runs BEFORE naming: reading the records can re-segment the
+    # corpus (`abstraction._reproject`), and a namer that ran first would hand
+    # back names keyed on kind ids that no longer mean the same thing.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
     html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)

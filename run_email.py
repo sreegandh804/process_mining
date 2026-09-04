@@ -7,12 +7,16 @@ Point it at an Enron-style maildir tree, an .mbox, or the Kaggle emails.csv:
     python run_email.py --path emails.csv --max-messages 3000 # Kaggle CSV, sliced
     python run_email.py --path inbox.mbox --no-llm            # deterministic baseline
 
-The model tier is **on by default** here, and it matters most on mail: an email's
-verb is `sent`/`replied` (transport, not the activity), so the record-reading
-tier turns "sent → replied" into real steps (Requested, Approved, …), and the
-semantic judge joins threads about the same work that share no words. It runs
-when ANTHROPIC_API_KEY is set and otherwise downshifts to the deterministic
-baseline and says so; `--no-llm` forces that baseline.
+The model tier is **on by default** here, and it matters most on mail. An email's
+verb is `sent`/`replied` — transport, not the work — and its structural shape is
+`(human, email_thread)` for every thread in the corpus, so neither the steps nor
+the processes can be had from the envelope. The record-reading tier reads both
+out of the text: "sent → replied" becomes real steps (Requested, Approved, …),
+and the threads separate into the families of work they are actually about
+(contract execution, invoice dispute) instead of one "Correspondence Sharing".
+The semantic judge additionally joins threads about the same work that share no
+words. It all runs when ANTHROPIC_API_KEY is set and otherwise downshifts to the
+deterministic baseline and says so; `--no-llm` forces that baseline.
 
 Realism earns more than volume (per the brief): a few thousand messages from a
 few mailboxes shows the threading, the fuzzy cross-thread joins, the automated-
@@ -72,10 +76,13 @@ def main(argv=None) -> int:
 
     m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=tier.semantic(log=prog)),
                manifest={"source_kind": "email", "n_messages": n_messages}, progress=prog)
-    names = infer_names(m, enable=tier.names_enable(), log=prog)
+    # Abstraction runs BEFORE naming: reading the records can re-segment the
+    # corpus (`abstraction._reproject`), and a namer that ran first would hand
+    # back names keyed on kind ids that no longer mean the same thing.
     # Mail is the case the reading tier exists for: the verb is transport, so the
     # activity is read from each record (gated on records-per-activity).
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
 
     out = Path(args.out_dir)
     write_json(m, out / "model.json")

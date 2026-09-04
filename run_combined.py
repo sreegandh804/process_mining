@@ -123,19 +123,15 @@ def main(argv=None) -> int:
     m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=provider),
                manifest={"source_kind": "combined", "n_records": n_records}, progress=prog)
 
-    # Name the kinds (and item) with the model — offline stand-in for --demo, the
-    # real Anthropic namer when the tier is on. `--names off` keeps raw verbs.
-    if args.demo:
-        from tests.combined_fixture import demo_namer
-        names = infer_names(m, namer=demo_namer, log=prog)
-    else:
-        names = infer_names(m, enable=(tier.names_enable() and args.names != "off"), log=prog)
-
     # AI-first process abstraction: the model groups artefact verbs into the
     # activities the process is made of, and reads each record where the verb is
     # only transport (a mailbox: 761 threads, one verb, one useless "Communicated"
     # step). With the tier off, no abstraction is claimed and the inspector shows
     # the raw artefacts.
+    #
+    # This runs BEFORE naming: reading the records can re-segment the corpus
+    # (`abstraction._reproject`), and a namer that ran first would hand back names
+    # keyed on kind ids that no longer mean the same thing.
     if args.demo:
         from tests.combined_fixture import demo_activity_mapper, demo_record_classifier
         mapper, classifier = demo_activity_mapper(), demo_record_classifier()
@@ -144,6 +140,14 @@ def main(argv=None) -> int:
     else:
         mapper, classifier = tier.mapper(log=prog), tier.classifier(log=prog)
     activities = infer_activities(m, mapper, classifier, log=prog)
+
+    # Name the kinds (and item) with the model — offline stand-in for --demo, the
+    # real Anthropic namer when the tier is on. `--names off` keeps raw verbs.
+    if args.demo:
+        from tests.combined_fixture import demo_namer
+        names = infer_names(m, namer=demo_namer, log=prog)
+    else:
+        names = infer_names(m, enable=(tier.names_enable() and args.names != "off"), log=prog)
 
     out = Path(args.out_dir)
     write_json(m, out / "model.json")

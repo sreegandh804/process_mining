@@ -43,6 +43,10 @@ class InducedModel:
     shaped: Shaped
     correlation: Correlation
     profile_id: str = "generic"
+    # The profile object itself, kept so `abstraction._reproject` can re-run
+    # `segment()` after the reading tier has read the records — the second
+    # segmentation is the real one, and it needs the same profile as the first.
+    profile: object = field(default=None, repr=False, compare=False)
     kinds: list[ProcessKind] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
     merges: list = field(default_factory=list)         # ActivityMerge (same-activity-different-people)
@@ -115,7 +119,7 @@ def induce(shaped: Shaped, slug: str = "model", profile=None, manifest: Optional
         prog.detail(f"orphan {o.record_id}: {o.reason}")
     return InducedModel(
         slug=slug, manifest=manifest or {}, shaped=shaped, correlation=corr,
-        profile_id=getattr(profile, "id", "generic"),
+        profile_id=getattr(profile, "id", "generic"), profile=profile,
         kinds=kinds, steps=label_result.steps, merges=label_result.merges,
         gaps=gaps, orphans=orphans,
     )

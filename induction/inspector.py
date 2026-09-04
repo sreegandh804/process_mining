@@ -49,6 +49,13 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
         return (names.get("steps", {}) or {}).get(a) or base_step.get(a) or a.replace("_", " ").title()
 
     def kind_label(k) -> str:
+        # A kind the reading tier formed already wears the family name the model
+        # read out of its own records. The namer must not overwrite that: it ran
+        # against the pre-reading kinds, so its map is keyed on ids that no
+        # longer mean the same thing, and its whole purpose (rescuing
+        # "Send then forward email") is already served here.
+        if getattr(k, "features", {}).get("read_process"):
+            return k.name
         return (names.get("kinds", {}) or {}).get(k.id) or k.name
 
     gaps_by_case = defaultdict(list)
@@ -255,6 +262,11 @@ def _process_view(k, m, kind_label, kind_runs) -> dict:
         "paths": paths,
         "flagged": k.rejected,
         "flag_note": k.reject_reason or "",
+        # Where this process boundary came from. Nothing in the data announces
+        # one, so the card has to say who drew it and on what — the same
+        # discipline every other claim on the page is held to.
+        "tier": k.confidence.tier.label,
+        "why": k.confidence.rationale or "",
     }
 
 
@@ -545,6 +557,8 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .proc.flagged{background:#fbfaf6;border-style:dashed;border-color:#e6d8b8}
   .proc .pt{font-size:18px;font-weight:700}
   .proc .pmeta{color:var(--ink-2);font-size:13px;margin-top:2px}
+  .proc .pwhy{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:8px;
+    padding-left:10px;border-left:2px solid var(--line)}
   .flag-note{font-size:13px;color:var(--flag);background:var(--attn-soft);border-radius:8px;padding:9px 12px;margin-top:12px}
   .flow{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:14px 0 4px}
   .step{background:var(--accent-soft);color:var(--accent);border:1px solid #cfe0fb;border-radius:8px;padding:5px 11px;font-size:13px;font-weight:600}
@@ -650,6 +664,7 @@ document.getElementById('procs').innerHTML = V.processes.map(p=>`
   <div class="proc ${p.flagged?'flagged':''}">
     <div class="pt">${esc(p.name)}</div>
     <div class="pmeta">${p.count} ${esc(V.meta.items)}${p.actors.length?' · '+p.actors.map(esc).join(', '):''}</div>
+    ${p.why?`<div class="pwhy"><b>Why these are one process (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
     ${p.flow.length?`<div class="flow">${p.flow.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${esc(s)}</span>`).join('')}</div>`:''}
     ${p.flagged?`<div class="flag-note"><b>Grouped separately.</b> ${esc(p.flag_note)}</div>`:''}
     <div class="paths">${p.paths.map(pa=>`

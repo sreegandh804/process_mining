@@ -124,7 +124,7 @@ class AnthropicJudge(SemanticJudge):
         try:
             msg = with_backoff(
                 lambda: self._client.messages.create(
-                    model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-opus-5"),
+                    model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-haiku-4-5"),
                     max_tokens=200,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
