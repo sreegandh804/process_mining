@@ -564,3 +564,48 @@ def test_a_bare_list_is_still_a_vocabulary_with_no_processes():
     from induction.abstraction import ReadVocabulary
     v = ReadVocabulary.of(["Requested", "Approved"])
     assert v.processes == [] and v.activities == ["Requested", "Approved"]
+
+
+def test_the_card_shows_its_own_processs_steps_in_the_definitions_order():
+    """Two bugs, one cause: deriving the headline from the runs instead of from
+    the process definition.
+
+    Order — discovery returns each process's steps in the order they happen.
+    Re-deriving that from a handful of gappy runs produced the right steps in
+    nearly the wrong order. Membership — a run is placed by majority vote, so it
+    can sit in one process while carrying records read into another's steps, and
+    the card then advertises a step belonging to a different process.
+    """
+    from induction.abstraction import Abstraction
+    from induction.inspector import _process_view
+
+    class _K:
+        id, name, rejected, reject_reason = "k1", "Invoicing", False, None
+        case_ids: list = []
+        features = {"read_process": "Invoicing"}
+        class confidence:
+            rationale = "read"
+            class tier:
+                label = "model"
+
+    class _M:
+        class shaped:
+            events: list = []
+            entities: list = []
+        cases: dict = {}
+
+    definition = ["Deal booked", "Invoice created", "Payment matched", "Shortfall pursued"]
+    runs = [
+        {"activities": [{"name": n, "arts": [{}], "unread_step": False}
+                        for n in ("Payment matched", "Deal booked")]},
+        {"activities": [{"name": n, "arts": [{}], "unread_step": False}
+                        for n in ("Invoice created", "Research idea scoped")]},
+    ]
+    view = _process_view(_K(), _M(), lambda k: k.name, runs, True,
+                         {"Invoicing": definition})
+    assert view["flow"] == ["Deal booked", "Invoice created", "Payment matched"], view["flow"]
+    assert "Shortfall pursued" not in view["flow"], "no run here performed it"
+    assert "Research idea scoped" not in view["flow"], (
+        "a step from another process leaked into the headline")
+    # it is still visible as evidence of what actually happened
+    assert any("Research idea scoped" in pa["seq"] for pa in view["paths"])

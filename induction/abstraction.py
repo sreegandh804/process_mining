@@ -246,6 +246,9 @@ class Abstraction:
     # `by_case` is filled by `_reproject` — a run's process is a COUNT over its
     # records' readings, never a label a model attached to the run itself.
     processes: list[str] = field(default_factory=list)
+    # process name -> its steps, IN THE ORDER DISCOVERY GAVE THEM. The definition
+    # of the process, as distinct from what any particular run did.
+    steps_by_process: dict[str, list[str]] = field(default_factory=dict)
     by_case: dict[str, str] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
@@ -635,6 +638,7 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
 
     abstraction.by_record = got
     abstraction.processes = processes
+    abstraction.steps_by_process = dict(vocab.steps_by_process)
     abstraction.n_unclassified = len(records) - len(got)
     abstraction.vocabulary = _audit_rows(activities, got, abstraction.n_unclassified)
     n_with_process = sum(1 for r in got.values() if r.get("process"))

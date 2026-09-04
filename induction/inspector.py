@@ -133,7 +133,8 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     runs_by_kind = defaultdict(list)
     for rv in runs:
         runs_by_kind[rv["kind_id"]].append(rv)
-    processes = [_process_view(k, m, kind_label, runs_by_kind.get(k.id, []), read_ran)
+    processes = [_process_view(k, m, kind_label, runs_by_kind.get(k.id, []), read_ran,
+                               abstraction.steps_by_process)
                  for k in m.kinds]
 
     # Filter buttons carry a GENERIC label per group (rows keep their specific
@@ -252,7 +253,8 @@ def _canon(kind) -> list[str]:
 _MIN_RUNS_FOR_NO_COMMON = 4
 
 
-def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False) -> dict:
+def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False,
+                  steps_by_process: dict | None = None) -> dict:
     # actors from the kind's events (richer than one-per-run)
     ev_by_id = {e.id: e for e in m.shaped.events}
     pname = {e.id: e.attrs.get("name", e.id) for e in m.shaped.entities if e.type == "person"}
@@ -367,6 +369,31 @@ def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False) -> dict:
         return sum(where[step]) / len(where[step]) if where.get(step) else 1.1
 
     flow = sorted(seen_steps, key=lambda st: (_at(st), -seen_steps[st], st))
+
+    # WHERE A PROCESS DEFINITION EXISTS, IT DEFINES THE HEADLINE.
+    #
+    # Two things go wrong when the headline is derived from the runs instead:
+    #
+    #  - the ORDER is noise. Discovery already returned each process's steps in
+    #    the order they happen; re-deriving that from three runs with 60%
+    #    abstention produced `Deal booked -> Invoice shortfall pursued ->
+    #    Payment received -> Manual invoice created`, which is the right steps
+    #    in nearly the wrong order. The definition's order is a claim the model
+    #    actually made; the observed order here is a small, gappy sample of it.
+    #
+    #  - the MEMBERSHIP leaks. A run is placed in a kind by majority vote over
+    #    its records, so a run can sit in one process while carrying records read
+    #    into another's steps. The card then advertises steps belonging to a
+    #    different process — "Academic Visit" was listing "Research idea scoped
+    #    with faculty", which is University Research Sponsorship's step.
+    #
+    # So: the definition's steps, in the definition's order, filtered to those
+    # some run here actually performed. Steps a run performed that belong to
+    # another process stay in the variant list below, where they are evidence of
+    # what happened rather than a claim about this process.
+    defined = (steps_by_process or {}).get(k.features.get("read_process") or "")
+    if defined:
+        flow = [st for st in defined if st in seen_steps]
 
     # The leftover kind is not a process and must not be drawn as one. Its runs
     # are the ones the reading declined to place; a flow across them would be a
