@@ -46,6 +46,7 @@ from induction.inspector import write_html
 from induction.model_tier import resolve
 from induction.naming import infer_names
 from induction.pipeline import induce
+from induction.progress import from_flags
 from induction.semantic import SemanticProvider
 from induction.steps.correlate import CorrelationPolicy
 
@@ -87,8 +88,13 @@ def main(argv=None) -> int:
                     help="add an embedding shortlist to the semantic judge (needs VOYAGE_API_KEY)")
     ap.add_argument("--names", choices=["auto", "off"], default="auto",
                     help="'off' keeps raw activity verbs even when the model tier is on")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="stream each inferred join / kind / gap as it is decided")
+    ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     ap.add_argument("--out-dir", default="out")
     args = ap.parse_args(argv)
+
+    prog = from_flags(quiet=args.quiet, verbose=args.verbose)
 
     if args.demo:
         shaped, slug = _load_demo()
@@ -104,7 +110,7 @@ def main(argv=None) -> int:
         tier = resolve("hybrid" if args.hybrid else "auto", no_llm=args.no_llm)
         shaped, slug = _load_real(Path(args.github) if args.github else None, args.github_slug,
                                   Path(args.mail) if args.mail else None, args.mail_slug)
-        provider = tier.semantic()
+        provider = tier.semantic(log=prog)
         tier_label = tier.label
 
     n_records = sum(1 for e in shaped.entities if e.type != "person")
@@ -115,15 +121,15 @@ def main(argv=None) -> int:
 
     print(f"[run] {n_records} records from {n_sources} sources · model tier: {tier_label}")
     m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=provider),
-               manifest={"source_kind": "combined", "n_records": n_records})
+               manifest={"source_kind": "combined", "n_records": n_records}, progress=prog)
 
     # Name the kinds (and item) with the model — offline stand-in for --demo, the
     # real Anthropic namer when the tier is on. `--names off` keeps raw verbs.
     if args.demo:
         from tests.combined_fixture import demo_namer
-        names = infer_names(m, namer=demo_namer)
+        names = infer_names(m, namer=demo_namer, log=prog)
     else:
-        names = infer_names(m, enable=(tier.names_enable() and args.names != "off"))
+        names = infer_names(m, enable=(tier.names_enable() and args.names != "off"), log=prog)
 
     # AI-first process abstraction: the model groups artefact verbs into the
     # activities the process is made of, and reads each record where the verb is
@@ -136,8 +142,8 @@ def main(argv=None) -> int:
     elif args.names == "off":
         mapper = classifier = None
     else:
-        mapper, classifier = tier.mapper(), tier.classifier()
-    activities = infer_activities(m, mapper, classifier)
+        mapper, classifier = tier.mapper(log=prog), tier.classifier(log=prog)
+    activities = infer_activities(m, mapper, classifier, log=prog)
 
     out = Path(args.out_dir)
     write_json(m, out / "model.json")

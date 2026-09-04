@@ -57,41 +57,85 @@ class InducedModel:
 def induce(shaped: Shaped, slug: str = "model", profile=None, manifest: Optional[dict] = None,
            policy: Optional[CorrelationPolicy] = None,
            gap_detectors: Optional[Iterable[Callable]] = None,
-           terminal_action: str = "paid", corroborating_action: str = "settled") -> InducedModel:
+           terminal_action: str = "paid", corroborating_action: str = "settled",
+           progress=None) -> InducedModel:
     """Steps 2-6 over an already-shaped corpus. Source-agnostic by construction.
 
     `shaped` may be one adapter's output or several concatenated — the correlator
     sees one record stream either way, which is the only reason a mail thread can
-    join to a ledger row.
+    join to a ledger row. `progress` (a `Progress`; default silent) reports each
+    stage, and at verbose level streams the individual joins/rejects/gaps.
     """
     from induction.profiles import GENERIC_PROFILE, select_profile
+    from induction.progress import NULL
+    prog = progress or NULL
     if profile is None:
         profile = GENERIC_PROFILE
     elif profile == "auto":
         profile = select_profile(shaped)
 
+    n_records = sum(1 for e in shaped.entities if e.type != "person")
+    prog.stage(f"correlate: grouping {n_records} records into cases …")
     corr = correlate(shaped, policy)
+    prog.stage(f"correlate: → {len(corr.cases)} cases")
+    _stream_inferred_joins(prog, corr)
+
     order(shaped, corr)
     order_observations(shaped.observations, corr)
+    unknown = sum(1 for c in corr.cases.values() if c.order_status == "unknown")
+    prog.stage(f"order: {len(corr.cases) - unknown} ordered · {unknown} order-unknown")
 
     from induction.steps.label import label as label_step
     label_result = label_step(shaped, corr, profile)
+    prog.stage(f"label: {len(label_result.steps)} activities · "
+               f"{len(label_result.merges)} same-activity merges")
 
     kinds = segment(shaped, corr, profile)
     apply_reject(kinds, profile)
+    prog.stage(f"segment: {len(kinds)} kind(s)")
+    for k in kinds:
+        if prog.verbose:
+            common = next((v for v in k.variants if v.role == "common"), None)
+            cp = " → ".join(common.signature) if common and common.signature else "—"
+            prog.detail(f"kind {k.name}: {len(k.case_ids)} runs, {len(k.variants)} variants "
+                        f"| common: {cp}")
+        if k.rejected:
+            prog.detail(f"rejected {k.name}: {k.reject_reason}")
 
     gaps: list[Gap] = []
     for detector in (gap_detectors if gap_detectors is not None
                      else _default_gap_detectors(slug, terminal_action, corroborating_action)):
         gaps.extend(detector(shaped, corr, kinds))
+    for g in gaps:
+        prog.detail(f"gap {g.kind} in {g.case_id}: {g.description}")
 
     orphans = collect_orphans(shaped, corr)
+    prog.stage(f"gaps: {len(gaps)} inferred · orphans: {len(orphans)}")
+    for o in orphans:
+        prog.detail(f"orphan {o.record_id}: {o.reason}")
     return InducedModel(
         slug=slug, manifest=manifest or {}, shaped=shaped, correlation=corr,
         profile_id=getattr(profile, "id", "generic"),
         kinds=kinds, steps=label_result.steps, merges=label_result.merges,
         gaps=gaps, orphans=orphans,
     )
+
+
+def _stream_inferred_joins(prog, corr) -> None:
+    """At verbose level, name each case assembled through an *inferred* join — the
+    fuzzy/model correlations a reader most wants to watch and audit (deterministic
+    joins are the many, obvious ones, so they are not streamed)."""
+    if not prog.verbose:
+        return
+    shown = 0
+    for c in corr.cases.values():
+        tier = c.confidence.tier.label
+        if tier in ("heuristic", "model") and c.confidence.rationale:
+            prog.detail(f"correlate [{tier}] {c.id}: {c.confidence.rationale}")
+            shown += 1
+            if shown >= 100:
+                prog.detail("correlate: … (further inferred joins omitted)")
+                break
 
 
 def _default_gap_detectors(slug: str, terminal_action: str, corroborating_action: str):
@@ -121,7 +165,7 @@ def _default_gap_detectors(slug: str, terminal_action: str, corroborating_action
 
 def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
                  with_thin: bool = True, with_github: bool = False,
-                 profile=None) -> InducedModel:
+                 profile=None, progress=None) -> InducedModel:
     """Git history (+ its changelog, + its GitHub Issues/PR corpus) -> induced model.
 
     Adding a source here is one `extend` call and nothing else — no branch
@@ -154,12 +198,12 @@ def run_pipeline(slug: str = "pallets/flask", raw_dir: str = "data/raw",
         from induction.adapters import changelog
         shaped.extend(changelog.load(raw_dir, slug))
 
-    return induce(shaped, slug=slug, profile=profile, manifest=manifest)
+    return induce(shaped, slug=slug, profile=profile, manifest=manifest, progress=progress)
 
 
 def run_tabular_pipeline(sources, slug="tabular", profile=None,
                          terminal_action="paid", corroborating_action="settled",
-                         max_cases=None) -> InducedModel:
+                         max_cases=None, progress=None) -> InducedModel:
     """Spreadsheets -> induced model.
 
     `sources` : list of (induction.adapters.tabular.TableSpec, path-to-csv-or-xlsx).
@@ -184,4 +228,4 @@ def run_tabular_pipeline(sources, slug="tabular", profile=None,
     }
     return induce(shaped, slug=slug, profile=profile, manifest=manifest,
                   terminal_action=terminal_action,
-                  corroborating_action=corroborating_action)
+                  corroborating_action=corroborating_action, progress=progress)

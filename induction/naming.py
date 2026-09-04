@@ -42,41 +42,48 @@ def _clean(names: dict) -> dict:
     }
 
 
-def infer_names(model, enable: bool = False, api_model: str | None = None, namer=None) -> dict:
+def infer_names(model, enable: bool = False, api_model: str | None = None, namer=None,
+                log=None) -> dict:
     """Return {item, items, steps:{action:Name}, kinds:{id:Name}} or {} if disabled.
 
     `namer` (a callable ``payload -> raw names``) is the injection seam: the demo
     passes an offline stand-in, tests a scripted one, and the whole naming path is
     exercised without a key. With no namer, the real Anthropic path runs — and
-    only when `enable` is true (an LLM call spends money) AND a key resolves.
+    only when `enable` is true (an LLM call spends money) AND a key resolves. The
+    one call retries transient API overload with backoff. `log` reports progress.
     """
+    log = log or (lambda m: None)
     payload = _payload(model)
     if namer is not None:
         try:
             return _disambiguate(_clean(namer(payload)), model)
         except Exception as e:  # naming is a convenience; never break the run
-            print(f"[names] namer skipped ({type(e).__name__}: {e})")
+            log(f"[names] namer skipped ({type(e).__name__}: {e})")
             return {}
 
     if not enable or not os.environ.get("ANTHROPIC_API_KEY"):
         return {}
+    from induction.anthropic_call import client, with_backoff
     try:
-        import anthropic
+        api = client()
     except ImportError:
-        print("[names] --names llm needs the Anthropic SDK: pip install anthropic")
+        log("[names] naming needs the Anthropic SDK: pip install anthropic")
         return {}
     try:
-        client = anthropic.Anthropic()
-        msg = client.messages.create(
-            model=api_model or os.environ.get("INDUCTION_NAMING_MODEL", "claude-opus-5"),
-            max_tokens=1500,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": _prompt(payload)}],
-        )
+        log(f"naming: labelling {len(payload.get('kinds', []))} kinds and "
+            f"{len(payload.get('activities', []))} activities with the model")
+        msg = with_backoff(
+            lambda: api.messages.create(
+                model=api_model or os.environ.get("INDUCTION_NAMING_MODEL", "claude-opus-5"),
+                max_tokens=1500,
+                system=_SYSTEM,
+                messages=[{"role": "user", "content": _prompt(payload)}],
+            ),
+            label="naming", log=log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         return _disambiguate(_clean(_parse(text)), model)
     except Exception as e:  # naming is a convenience; never break the run
-        print(f"[names] LLM naming skipped ({type(e).__name__}: {e})")
+        log(f"[names] LLM naming skipped ({type(e).__name__}: {e})")
         return {}
 
 

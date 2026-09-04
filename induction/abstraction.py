@@ -88,45 +88,51 @@ class AnthropicActivityMapper(ActivityMapper):
         "covering every pair."
     )
 
-    def __init__(self, api_model: Optional[str] = None):
+    def __init__(self, api_model: Optional[str] = None, log=None):
         self.api_model = api_model
+        self._log = log or (lambda m: None)
 
     def map(self, vocab: list[dict]) -> dict[str, str]:
         if not vocab or not os.environ.get("ANTHROPIC_API_KEY"):
             return {}
+        from induction.anthropic_call import client, with_backoff
         try:
-            import anthropic
+            api = client()
         except ImportError:
-            print("[abstraction] activity mapping needs the Anthropic SDK: pip install anthropic")
+            self._log("[abstraction] activity mapping needs the Anthropic SDK: pip install anthropic")
             return {}
         try:
-            client = anthropic.Anthropic()
-            msg = client.messages.create(
-                model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
-                max_tokens=1200,
-                system=self._SYSTEM,
-                messages=[{"role": "user", "content":
-                           "Vocabulary:\n" + json.dumps(vocab, indent=2) +
-                           "\n\nReturn the JSON map."}],
-            )
+            msg = with_backoff(
+                lambda: api.messages.create(
+                    model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
+                    max_tokens=1200,
+                    system=self._SYSTEM,
+                    messages=[{"role": "user", "content":
+                               "Vocabulary:\n" + json.dumps(vocab, indent=2) +
+                               "\n\nReturn the JSON map."}],
+                ),
+                label="activity map", log=self._log)
             text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
             got = _parse_map(text)
             present = {_key(v["artefact"], v["action"]) for v in vocab}
             # Guardrail: keep only string→string entries for pairs we actually gave.
             return {str(k): str(v) for k, v in got.items() if k in present and v}
         except Exception as e:  # abstraction is a convenience; never break the run
-            print(f"[abstraction] activity mapping skipped ({type(e).__name__}: {e})")
+            self._log(f"[abstraction] activity mapping skipped ({type(e).__name__}: {e})")
             return {}
 
 
 def infer_activities(m, mapper: Optional[ActivityMapper],
-                     classifier: "Optional[RecordClassifier]" = None) -> "Abstraction":
+                     classifier: "Optional[RecordClassifier]" = None,
+                     log=None) -> "Abstraction":
     """Name the corpus's activities — the verb map first, the record classifier
     only where the verb map had nothing to say.
 
     Returns an `Abstraction`. With no mapper and no classifier it is empty, and
-    the engine shows raw artefacts, claiming no abstraction.
+    the engine shows raw artefacts, claiming no abstraction. `log` (a `msg->None`
+    sink) reports progress; default is silent.
     """
+    log = log or (lambda m: None)
     types = {e.id: e.type for e in m.shaped.entities}
     vocab: dict[str, dict] = {}
     for ev in m.shaped.events:
@@ -137,6 +143,8 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
         if snip and len(entry["examples"]) < 3 and snip not in entry["examples"]:
             entry["examples"].append(snip[:80])
 
+    if mapper is not None:
+        log(f"abstraction: mapping {len(vocab)} (artefact, verb) pairs to activities")
     by_vocab = mapper.map(list(vocab.values())) if mapper is not None else {}
     abstraction = Abstraction(by_vocab=by_vocab)
     if classifier is None:
@@ -145,7 +153,7 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
     events = _events_needing_a_reading(m, by_vocab, types)
     if not events:
         return abstraction          # the verbs discriminated; nothing to read
-    _read_the_records(abstraction, m, events, classifier)
+    _read_the_records(abstraction, m, events, classifier, log)
     return abstraction
 
 
@@ -323,8 +331,9 @@ def _record_text(ev, m) -> str:
     return _text_of(ent, DEFAULT_POLICY.fuzzy.text_attrs)[:1200]
 
 
-def _read_the_records(abstraction: "Abstraction", m, events, classifier) -> None:
+def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=None) -> None:
     """Discover the corpus's activity vocabulary, then read each record into it."""
+    log = log or (lambda m: None)
     records = []
     seen_ids = set()
     for ev in events:
@@ -338,32 +347,37 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier) -> None
     if not records:
         return
 
+    log(f"abstraction: verbs are transport, reading {len(records)} records "
+        f"(discovering the activity vocabulary from a sample of {min(len(records), _DISCOVERY_SAMPLE)})")
     sample = [r["text"] for r in records[:_DISCOVERY_SAMPLE]]
     try:
         vocabulary = [v for v in classifier.discover(sample) if isinstance(v, str) and v.strip()]
     except Exception as e:                # the tier is a convenience, never a blocker
-        print(f"[abstraction] activity discovery skipped ({type(e).__name__}: {e})")
+        log(f"[abstraction] activity discovery skipped ({type(e).__name__}: {e})")
         return
     if len(vocabulary) < 2:
         # One activity is what the verb map already told us; claiming it again,
         # more expensively, is not an improvement. But say so — a silent return
         # here is indistinguishable from the tier never having been asked, and on
         # a real run that cost an evening of wondering which had happened.
-        print(f"[abstraction] {len(records)} records needed reading, but activity "
-              f"discovery returned {len(vocabulary)} activities "
-              f"({vocabulary or 'none'}) — nothing to classify into, so the steps "
-              f"stay as the source's own verbs")
+        log(f"[abstraction] {len(records)} records needed reading, but activity "
+            f"discovery returned {len(vocabulary)} activities "
+            f"({vocabulary or 'none'}) — nothing to classify into, so the steps "
+            f"stay as the source's own verbs")
         return
-    print(f"[abstraction] reading {len(records)} records into "
-          f"{len(vocabulary)} activities: {', '.join(vocabulary)}")
+    n_batches = (len(records) + _CLASSIFY_BATCH - 1) // _CLASSIFY_BATCH
+    log(f"abstraction: reading {len(records)} records into {len(vocabulary)} "
+        f"activities ({', '.join(vocabulary)}) — {n_batches} batch(es)")
 
     got: dict[str, dict] = {}
     for i in range(0, len(records), _CLASSIFY_BATCH):
         batch = records[i:i + _CLASSIFY_BATCH]
+        b = i // _CLASSIFY_BATCH + 1
+        log(f"abstraction: classifying batch {b}/{n_batches} ({len(batch)} records)")
         try:
             got.update(_clean_readings(classifier.classify(batch, vocabulary), batch, vocabulary))
         except Exception as e:
-            print(f"[abstraction] batch {i // _CLASSIFY_BATCH} skipped ({type(e).__name__}: {e})")
+            log(f"[abstraction] batch {b} skipped ({type(e).__name__}: {e})")
 
     abstraction.by_record = got
     abstraction.n_unclassified = len(records) - len(got)
@@ -471,19 +485,22 @@ class AnthropicRecordClassifier(RecordClassifier):
         'ONLY JSON: {"<record id>": {"activity": "<Name>", "span": "<quoted text>"}}'
     )
 
-    def __init__(self, api_model: Optional[str] = None):
+    def __init__(self, api_model: Optional[str] = None, log=None):
         self.api_model = api_model
+        self._log = log or (lambda m: None)
 
     def _call(self, system: str, content: str, max_tokens: int) -> dict:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             return {}
-        import anthropic
-        client = anthropic.Anthropic()
-        msg = client.messages.create(
-            model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
-            max_tokens=max_tokens, system=system,
-            messages=[{"role": "user", "content": content}],
-        )
+        from induction.anthropic_call import client, with_backoff
+        api = client()
+        msg = with_backoff(
+            lambda: api.messages.create(
+                model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
+                max_tokens=max_tokens, system=system,
+                messages=[{"role": "user", "content": content}],
+            ),
+            label="activity reading", log=self._log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         return _parse_map(text)
 

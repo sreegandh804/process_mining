@@ -32,6 +32,7 @@ from induction.model_tier import ModelTier, resolve
 from induction.naming import infer_names
 from induction.pipeline import run_tabular_pipeline
 from induction.profiles import ACCOUNTING_PROFILE, GENERIC_PROFILE
+from induction.progress import Progress, from_flags
 
 
 def sources_for(base: Path, ext: str):
@@ -65,7 +66,7 @@ def sources_for(base: Path, ext: str):
     raise FileNotFoundError(f"no grants.{ext} or invoices.{ext} in {base}")
 
 
-def _run_detected(args, tier: ModelTier) -> int:
+def _run_detected(args, tier: ModelTier, prog: Progress) -> int:
     """Read a file whose shape we were not told, and say what we decided.
 
     The detection is an inference like any other here, so it is printed before
@@ -106,9 +107,9 @@ def _run_detected(args, tier: ModelTier) -> int:
         print(f"[run] {found.rationale}  [{found.confidence.tier.label}]")
 
     m = run_tabular_pipeline([(found.spec, path)], slug=path.stem,
-                             profile=GENERIC_PROFILE, max_cases=args.max_cases)
-    names = infer_names(m, enable=tier.names_enable())
-    activities = infer_activities(m, tier.mapper(), tier.classifier())
+                             profile=GENERIC_PROFILE, max_cases=args.max_cases, progress=prog)
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
     html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)
@@ -138,12 +139,16 @@ def main(argv=None) -> int:
                          "is set, else the deterministic baseline). 'llm' insists on it.")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic baseline (raw verbs, no AI naming/abstraction)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="stream each inferred join / kind / gap as it is decided")
+    ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
 
+    prog = from_flags(quiet=args.quiet, verbose=args.verbose)
     tier = resolve(args.names, no_llm=args.no_llm)
 
     if args.file:
-        return _run_detected(args, tier)
+        return _run_detected(args, tier, prog)
 
     base = Path(args.dir)
     ext = "xlsx" if args.xlsx else "csv"
@@ -161,10 +166,10 @@ def main(argv=None) -> int:
     slug = base.name
     print(f"[run] inducing processes from {args.dir} ({ext}, profile: {args.profile}) "
           f"· model tier: {tier.label} ...")
-    m = run_tabular_pipeline(sources, slug=slug, profile=profile)
+    m = run_tabular_pipeline(sources, slug=slug, profile=profile, progress=prog)
 
-    names = infer_names(m, enable=tier.names_enable())
-    activities = infer_activities(m, tier.mapper(), tier.classifier())
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
     html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)

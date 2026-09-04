@@ -82,6 +82,13 @@ class AnthropicJudge(SemanticJudge):
     `naming.py` lives under: it decides the pair it is handed and returns JSON;
     anything else it says is ignored, and any failure downgrades to "no join"
     rather than breaking the run.
+
+    Resilience: each call retries transient API overload (529 / 429 / 5xx) with
+    backoff. If the API stays overloaded *through* the retries, a **circuit
+    breaker** trips — the judge disables itself for the rest of the run instead of
+    retrying every remaining pair for a minute apiece, says so once (`self._log`),
+    and the correlator carries on with deterministic + fuzzy joins. `skipped`
+    counts the pairs it could not judge, for a one-line summary at the call site.
     """
 
     _SYSTEM = (
@@ -93,37 +100,54 @@ class AnthropicJudge(SemanticJudge):
         '{"same": true|false, "reason": "<one short clause>"}.'
     )
 
-    def __init__(self, api_model: Optional[str] = None, max_reason: int = 160):
+    def __init__(self, api_model: Optional[str] = None, max_reason: int = 160,
+                 log=None, tries: int = 5):
         self.api_model = api_model
         self.max_reason = max_reason
+        self._log = log or (lambda m: None)
+        self._tries = tries
+        self._client = None
+        self._tripped = False   # the breaker: API stayed overloaded through retries
+        self.skipped = 0        # pairs we could not judge (transient or otherwise)
 
     def judge(self, a_text: str, b_text: str) -> Optional[str]:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if self._tripped or not os.environ.get("ANTHROPIC_API_KEY"):
             return None
+        from induction.anthropic_call import client, is_transient, with_backoff
+        if self._client is None:
+            try:
+                self._client = client()
+            except ImportError:
+                self._log("[semantic] judge needs the Anthropic SDK: pip install anthropic")
+                self._tripped = True
+                return None
         try:
-            import anthropic
-        except ImportError:
-            print("[semantic] --semantic llm needs the Anthropic SDK: pip install anthropic")
-            return None
-        try:
-            client = anthropic.Anthropic()
-            msg = client.messages.create(
-                model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-opus-5"),
-                max_tokens=200,
-                system=self._SYSTEM,
-                messages=[{"role": "user", "content":
-                           f"Record A:\n{a_text[:1500]}\n\nRecord B:\n{b_text[:1500]}\n\n"
-                           "Same piece of work?"}],
-            )
-            text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
-            verdict = _parse_json(text)
-            if verdict.get("same") is True:
-                reason = str(verdict.get("reason", "") or "model judged these the same work")
-                return reason[:self.max_reason]
-            return None
+            msg = with_backoff(
+                lambda: self._client.messages.create(
+                    model=self.api_model or os.environ.get("INDUCTION_SEMANTIC_MODEL", "claude-opus-5"),
+                    max_tokens=200,
+                    system=self._SYSTEM,
+                    messages=[{"role": "user", "content":
+                               f"Record A:\n{a_text[:1500]}\n\nRecord B:\n{b_text[:1500]}\n\n"
+                               "Same piece of work?"}],
+                ),
+                tries=self._tries, label="semantic judge", log=self._log)
         except Exception as e:  # a correlation convenience; never break the run
-            print(f"[semantic] judge skipped ({type(e).__name__}: {e})")
+            self.skipped += 1
+            if is_transient(e):
+                self._tripped = True
+                self._log(f"[semantic] API still overloaded after {self._tries} retries — "
+                          "disabling the semantic judge for the rest of this run "
+                          "(deterministic + fuzzy joins still apply).")
+            else:
+                self._log(f"[semantic] judge skipped ({type(e).__name__}: {e})")
             return None
+        text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        verdict = _parse_json(text)
+        if verdict.get("same") is True:
+            reason = str(verdict.get("reason", "") or "model judged these the same work")
+            return reason[:self.max_reason]
+        return None
 
 
 # ---------------------------------------------------------------------------

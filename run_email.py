@@ -33,6 +33,7 @@ from induction.inspector import write_html
 from induction.model_tier import resolve
 from induction.naming import infer_names
 from induction.pipeline import induce
+from induction.progress import from_flags
 from induction.steps.correlate import CorrelationPolicy
 
 
@@ -48,8 +49,12 @@ def main(argv=None) -> int:
                          "deterministic baseline). 'llm' insists on it.")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic baseline (raw verbs, no AI naming/abstraction)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="stream each inferred join / kind / gap as it is decided")
+    ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
 
+    prog = from_flags(quiet=args.quiet, verbose=args.verbose)
     tier = resolve(args.names, no_llm=args.no_llm)
 
     p = Path(args.path)
@@ -65,12 +70,12 @@ def main(argv=None) -> int:
         print("[run] no messages parsed — is this a maildir/.mbox/.csv?", file=sys.stderr)
         return 2
 
-    m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=tier.semantic()),
-               manifest={"source_kind": "email", "n_messages": n_messages})
-    names = infer_names(m, enable=tier.names_enable())
+    m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=tier.semantic(log=prog)),
+               manifest={"source_kind": "email", "n_messages": n_messages}, progress=prog)
+    names = infer_names(m, enable=tier.names_enable(), log=prog)
     # Mail is the case the reading tier exists for: the verb is transport, so the
     # activity is read from each record (gated on records-per-activity).
-    activities = infer_activities(m, tier.mapper(), tier.classifier())
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
 
     out = Path(args.out_dir)
     write_json(m, out / "model.json")

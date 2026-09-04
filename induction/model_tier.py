@@ -66,21 +66,21 @@ class ModelTier:
     def names_enable(self) -> bool:
         return self.active
 
-    def mapper(self):
+    def mapper(self, log=None):
         """Tier-1 activity mapper (verbs -> activities), or None when off."""
         if not self.active:
             return None
         from induction.abstraction import AnthropicActivityMapper
-        return AnthropicActivityMapper()
+        return AnthropicActivityMapper(log=log)
 
-    def classifier(self):
+    def classifier(self, log=None):
         """Tier-2 record reader (for transport-only verbs), or None when off."""
         if not self.active:
             return None
         from induction.abstraction import AnthropicRecordClassifier
-        return AnthropicRecordClassifier()
+        return AnthropicRecordClassifier(log=log)
 
-    def semantic(self):
+    def semantic(self, log=None):
         """Semantic-correlation provider (same-work judge, + optional embedder),
         or None when off. Only runners that pass this into a `CorrelationPolicy`
         use it."""
@@ -88,8 +88,8 @@ class ModelTier:
             return None
         from induction.semantic import AnthropicJudge, SemanticProvider, VoyageEmbedder
         if self.hybrid:
-            return SemanticProvider(judge=AnthropicJudge(), embedder=VoyageEmbedder())
-        return SemanticProvider(judge=AnthropicJudge())
+            return SemanticProvider(judge=AnthropicJudge(log=log), embedder=VoyageEmbedder())
+        return SemanticProvider(judge=AnthropicJudge(log=log))
 
 
 def resolve(mode: str = "auto", *, no_llm: bool = False, stream=None) -> ModelTier:
