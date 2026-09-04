@@ -98,7 +98,8 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
     # gets its usual (deliberately reluctant) turn.
     read_terms: dict[tuple, str] = {}
     if case_process:
-        clusters, read_terms = _split_by_read_process(clusters, case_process)
+        clusters, read_terms = _split_by_read_process(clusters, case_process,
+                                                      cases=corr.cases)
         topic_terms: dict[tuple, tuple[str, ...]] = {}
     else:
         clusters, topic_terms = _refine_by_topic(clusters, corr, entities_by_id, topics)
@@ -115,6 +116,7 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
         read_process = read_terms.get(key)
         if read_process:
             kf["read_process"] = read_process
+            kf["project"] = ("project", read_process) in key
 
         # A profile names a kind from its features, so two topic-refined
         # siblings can claim the same name. Keep the profile's word and make the
@@ -132,7 +134,13 @@ def segment(shaped: Shaped, corr: Correlation, profile: Profile = GENERIC_PROFIL
             why = (f"kind boundary inferred by structural clustering, then grouped by "
                    f"shared vocabulary ({', '.join(terms)}); not read")
 
-        if read_process:
+        if read_process and kf.get("project"):
+            display = read_process
+            pk_confidence = model_tier(
+                f"a project, not a process: {len(case_ids)} run(s) of {read_process} "
+                f"with a real multi-step arc, but nothing that recurs — it happened, "
+                f"it had stages, it is not how work is usually done here")
+        elif read_process:
             # A boundary drawn from records the model actually read. The name is
             # the family it named; the tier is `model`, because that is the claim.
             display = read_process
@@ -169,8 +177,15 @@ def _case_text(case, entities_by_id) -> str:
     return " ".join(parts)[:_MAX_POOLED_TEXT]
 
 
+# A one-off needs this many distinct read steps to count as a project rather than
+# noise. Three: a request and its answer is correspondence; a request, a review
+# and a decision is an arc.
+_PROJECT_MIN_STEPS = 3
+
+
 def _split_by_read_process(clusters: dict, case_process: dict,
-                           policy: TopicPolicy = DEFAULT_TOPIC_POLICY):
+                           policy: TopicPolicy = DEFAULT_TOPIC_POLICY,
+                           cases: dict | None = None):
     """Split each structural cluster by the process its runs were READ into.
 
     Two refusals, both taken from `_refine_by_topic` — not because a mailbox
@@ -198,12 +213,26 @@ def _split_by_read_process(clusters: dict, case_process: dict,
             proc = case_process.get(cid)
             (by_process[proc] if proc else unplaced).append(cid)
         for proc, ids in sorted(by_process.items()):
-            if len(ids) < floor:
-                unplaced.extend(ids)          # too few here to be a kind of its own
+            if len(ids) >= floor:
+                sub_key = key + (("process", proc),)
+                out.setdefault(sub_key, []).extend(ids)
+                terms_by_key[sub_key] = proc
                 continue
-            sub_key = key + (("process", proc),)
-            out.setdefault(sub_key, []).extend(ids)
-            terms_by_key[sub_key] = proc
+            # Below the floor it is not a PROCESS — nothing recurs. But it may be a
+            # PROJECT: one run (or two) with a real multi-step arc. Upgrading the
+            # office chairs is contact the seller -> negotiate -> proposal reviewed
+            # -> paid -> delivered, once. That is work with structure, and binning
+            # it with "Congratulations" and forwarded MIME blobs is a lie of
+            # omission. Repetition makes a process; structure without repetition
+            # is a project; neither is noise.
+            if cases is not None and any(
+                    len(set(cases[cid].trace_signature)) >= _PROJECT_MIN_STEPS
+                    for cid in ids if cid in cases):
+                sub_key = key + (("project", proc),)
+                out.setdefault(sub_key, []).extend(ids)
+                terms_by_key[sub_key] = proc
+                continue
+            unplaced.extend(ids)              # no repetition, no arc: not a thing
         if unplaced:
             out.setdefault(key, []).extend(unplaced)
     return out, terms_by_key

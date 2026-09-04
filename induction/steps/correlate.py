@@ -442,6 +442,8 @@ def _semantic_pass(provider: SemanticProvider, policy: FuzzyPolicy, entities,
         members[graph.find(eid)].append(eid)
 
     roots = list(texts)
+    when_who = {r: _component_when_who(members[r], events_by_entity, obs_by_entity)
+                for r in roots}
     candidates: list[tuple[str, str]] = []
     for i, ra in enumerate(roots):
         for rb in roots[i + 1:]:
@@ -450,9 +452,43 @@ def _semantic_pass(provider: SemanticProvider, policy: FuzzyPolicy, entities,
                 continue
             if _same_shape(members[ra], members[rb], events_by_entity, policy.max_activity_overlap):
                 continue
+            # SAME TOPIC IS NOT SAME RUN. The judge reads text, and text is what
+            # a topic is made of: two threads about "the Dominion dispute", a
+            # fortnight apart, with entirely different people on them, read as
+            # the same work to a model and are two runs to anyone in the room.
+            # On samples/enron that fused four subject threads into one 24-message
+            # case whose trace interleaved two processes. Time proximity alone
+            # cannot catch it — a fortnight is close. So a model join needs the
+            # second, independent signal a real key would carry: someone in
+            # common.
+            #
+            # Applied WITHIN ONE SOURCE only. Across sources the identity
+            # namespaces do not line up — GitHub `maria` and maria@… are the same
+            # person and different ids — so "nobody in common" is not evidence
+            # there, and the cross-source join is the one the judge exists for.
+            # Within a source it is decisive: two mail threads with disjoint
+            # senders are two conversations.
+            _, who_a = when_who[ra]
+            _, who_b = when_who[rb]
+            same_source = (_sources(members[ra], entities) == _sources(members[rb], entities)
+                           and len(_sources(members[ra], entities)) == 1)
+            if same_source and who_a and who_b and not (who_a & who_b):
+                continue
             candidates.append((ra, rb))
     if not candidates:
         return []
+
+    def with_context(root: str) -> str:
+        """What the judge is shown: the text, headed by the facts that separate a
+        run from a subject — when it happened and who was on it."""
+        whens, whos = when_who[root]
+        head = []
+        if whens:
+            lo, hi = min(whens), max(whens)
+            head.append(f"When: {lo.date()}" + (f" to {hi.date()}" if hi != lo else ""))
+        if whos:
+            head.append("Who: " + ", ".join(sorted(w.split(":")[-1] for w in whos)[:6]))
+        return ("\n".join(head) + "\n\n" if head else "") + texts[root]
 
     # Shortlist so the judge runs on a handful. An embedder ranks best; with none,
     # judge them all when few, else token-rank down to the cap — a budget when there
@@ -472,7 +508,7 @@ def _semantic_pass(provider: SemanticProvider, policy: FuzzyPolicy, entities,
     for ra, rb in shortlist:
         if ra in taken or rb in taken:
             continue
-        reason = provider.judge.judge(texts[ra], texts[rb])
+        reason = provider.judge.judge(with_context(ra), with_context(rb))
         if not reason:
             continue
         taken.add(ra)

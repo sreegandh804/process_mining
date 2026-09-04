@@ -316,9 +316,14 @@ def test_each_process_has_the_steps_its_records_evidence(families):
     assert procs["Contract execution"]["flow"] == [
         "Requested", "Reviewed", "Approved", "Executed"]
     assert procs["Invoice dispute"]["flow"] == ["Chased", "Disputed", "Settled"]
-    # …and the second chase is still on the record, in the run's own path.
-    seqs = {tuple(pa["seq"]) for pa in procs["Invoice dispute"]["paths"]}
-    assert ("Chased", "Disputed", "Chased", "Settled") in seqs
+    # …and the second chase is still on the record — not as a variant row (the
+    # variant is the SHAPE, and a loop-back is not a different shape) but in the
+    # run's own detail, where what actually happened lives.
+    assert [tuple(pa["seq"]) for pa in procs["Invoice dispute"]["paths"]] == [
+        ("Chased", "Disputed", "Settled")]
+    exact = {tuple(n["name"] for n in r["activities"] if not n.get("unread_step"))
+             for r in view["runs"] if r["kind"] == "Invoice dispute"}
+    assert ("Chased", "Disputed", "Chased", "Settled") in exact
 
 
 def test_the_headline_is_not_one_runs_trace(families):

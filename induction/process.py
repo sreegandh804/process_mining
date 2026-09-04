@@ -64,10 +64,14 @@ class Case:
 class Variant:
     """One distinct trace shape within a process kind, with its real frequency."""
 
-    signature: tuple
+    signature: tuple                     # the SHAPE — distinct steps, first-occurrence order
     frequency: int
     case_ids: list[str]
     role: str = "one-off"                # "common" | "exception" | "one-off"
+    # The exact traces grouped under this shape, with how many runs took each.
+    # `A -> B -> C -> B` and `A -> B -> C` are one variant; this is where the
+    # loop-back is still on record.
+    traces: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +80,8 @@ class Variant:
             "role": self.role,
             "example_case_ids": self.case_ids[:5],
             "n_cases": len(self.case_ids),
+            "traces": [{"trace": list(t), "n": n} for t, n in
+                       sorted(self.traces.items(), key=lambda kv: -kv[1])],
         }
 
 

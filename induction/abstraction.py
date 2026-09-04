@@ -221,6 +221,15 @@ _CLASSIFY_BATCH = 25
 # Size these to the answer PLUS room to think, and let `_call` say so when a
 # reply is cut off anyway. The alternative — turning thinking down per model —
 # would need this layer to know which model it is talking to, and it does not.
+# A step is a label, not a description. Process mining works from a controlled
+# activity vocabulary of short verb phrases; a 13-word "step" is a summary of one
+# record, matches nothing else, and cannot be compared across runs. The live
+# Enron run produced "Pre-petition and post-petition exposure worksheets built
+# from allocation and imbalance reports" as a step — and 56% abstention, because
+# nothing else in the corpus could be that step. Longer labels are dropped and
+# said so, rather than let through to fragment every variant.
+_MAX_LABEL_WORDS = 5
+
 _DISCOVER_TOKENS = 8000
 _MAP_TOKENS = 8000
 _CLASSIFY_TOKENS = 16000
@@ -780,6 +789,11 @@ class AnthropicRecordClassifier(RecordClassifier):
         "process. As specific as the work actually is, but a stage several runs pass "
         "through — not a one-off task you saw in a single record.\n"
         "\n"
+        "A STEP IS A LABEL, NOT A DESCRIPTION: 2 to 4 words, a verb phrase. 'Counsel "
+        "engaged', 'Invoice issued', 'Onsite interview', 'Termination validated'. If "
+        "it takes a sentence to say what the step is, it is not one step — split it "
+        "or generalise it. Labels longer than five words will be discarded.\n"
+        "\n"
         "The domain is whatever the sample says it is — engineering, clinical, "
         "logistics, legal, manufacturing, support. Take every name from the sample's "
         "own subject matter and vocabulary; do not reach for the language of office "
@@ -851,6 +865,11 @@ class AnthropicRecordClassifier(RecordClassifier):
             "Records:\n" + json.dumps([s[:400] for s in samples], indent=1),
             max_tokens=_DISCOVER_TOKENS)
         vocab = _vocabulary_from(got, self._PROCESS_KEYS, self._STEP_KEYS)
+        vocab, dropped = _enforce_label_form(vocab)
+        if dropped:
+            self._log(f"[abstraction] {len(dropped)} step label(s) discarded for being "
+                      f"descriptions rather than labels (> {_MAX_LABEL_WORDS} words), e.g. "
+                      f"{dropped[0]!r}")
         if not vocab and raw:
             self._log("[abstraction] discovery could not read a process model out of "
                       f"the model's reply, which was: {raw[:300]!r}")
@@ -870,6 +889,19 @@ class AnthropicRecordClassifier(RecordClassifier):
             + "\n\nReturn the JSON. Omit any record you are not sure about.",
             max_tokens=_CLASSIFY_TOKENS)
         return got if isinstance(got, dict) else {}
+
+
+def _enforce_label_form(vocab: ReadVocabulary) -> tuple[ReadVocabulary, list[str]]:
+    """Drop step labels that are descriptions. Returns (vocab, dropped labels)."""
+    def ok(label: str) -> bool:
+        return len(label.split()) <= _MAX_LABEL_WORDS
+
+    dropped = [st for steps in vocab.steps_by_process.values() for st in steps if not ok(st)]
+    dropped += [st for st in vocab.loose if not ok(st)]
+    kept = {name: [st for st in steps if ok(st)]
+            for name, steps in vocab.steps_by_process.items()}
+    return ReadVocabulary(steps_by_process={k: v for k, v in kept.items() if v},
+                          loose=[st for st in vocab.loose if ok(st)]), dropped
 
 
 def _vocabulary_from(obj, process_keys, step_keys) -> ReadVocabulary:

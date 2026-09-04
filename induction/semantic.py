@@ -95,7 +95,10 @@ class AnthropicJudge(SemanticJudge):
         "You decide whether two records from a company's systems are the SAME piece "
         "of work — the same task, incident, or change — not merely the same topic. "
         "Two invoices to one customer are not the same work. A bug report and the pull "
-        "request that fixes it ARE. Judge only the two records shown; do not invent "
+        "request that fixes it ARE. Two threads about the same counterparty, weeks "
+        "apart, with different people on them, are two runs of work about one "
+        "subject — NOT the same work. Each record is headed by WHEN it happened and "
+        "WHO was on it: use both. Judge only the two records shown; do not invent "
         "facts about either. Answer ONLY compact JSON: "
         '{"same": true|false, "reason": "<one short clause>"}.'
     )

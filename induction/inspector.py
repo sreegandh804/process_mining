@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from induction.abstraction import Abstraction
+from induction.steps.variants import shape
 from induction.emit import disclaimers_for
 from induction.pipeline import InducedModel
 
@@ -297,7 +298,14 @@ def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False,
     n_records = sum(len(n["arts"]) for rv in kind_runs for n in rv["activities"])
     runs_with_steps = [rv for rv in kind_runs if read_seq(rv)]
 
-    sigs = Counter(read_seq(rv) for rv in runs_with_steps)
+    # Variants at the SHAPE level — distinct steps in first-occurrence order —
+    # so a loop-back or a re-sent reply is not a new "different order" row. The
+    # exact traces are kept per shape and shown as detail. See variants.shape.
+    exact: dict[tuple, Counter] = defaultdict(Counter)
+    for rv in runs_with_steps:
+        seq = read_seq(rv)
+        exact[shape(seq)][seq] += 1
+    sigs = Counter({sh: sum(c.values()) for sh, c in exact.items()})
     max_freq = max(sigs.values(), default=1)
 
     # A common path only exists if some path is actually COMMON. Where every run
@@ -406,7 +414,15 @@ def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False,
         "label": "" if no_common else _path_label(sig, canon, ident),
         "rare": freq == 1 and len(sigs) > 1,
         "width": max(6, round(freq / max_freq * 180)),
+        # how many distinct exact traces sit under this shape (loops, re-sends)
+        "n_traces": len(exact[sig]),
     } for sig, freq in sigs.most_common()]
+
+    # The leftover kind is the runs the reading could not place. It has a count
+    # and a reason; it does not have paths. Three variant rows assembled from
+    # nine readable records out of 105 is a shape made of noise.
+    if leftover:
+        paths, no_common = [], False
 
     return {
         "id": k.id,
@@ -431,6 +447,8 @@ def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False,
         "tier": k.confidence.tier.label,
         "why": _boundary_why(k, kind_runs, read_ran),
         "leftover": leftover,
+        # A one-off with a real arc: shown, and labelled for what it is.
+        "project": bool(k.features.get("project")),
     }
 
 
@@ -743,6 +761,9 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .proc .pmeta{color:var(--ink-2);font-size:13px;margin-top:2px}
   .proc .pwhy{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:8px;
     padding-left:10px;border-left:2px solid var(--line)}
+  .path .ntr{color:var(--ink-3);font-size:11px}
+  .proc .ptag{display:inline-block;font-size:11px;font-weight:600;color:var(--attn);
+    background:var(--attn-soft);border-radius:999px;padding:2px 9px;margin-left:8px;vertical-align:middle}
   .proc .plabel{color:var(--ink-3);font-size:11px;text-transform:uppercase;
     letter-spacing:.05em;font-weight:600;margin-top:14px}
   .proc .pnone{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:10px;
@@ -850,7 +871,7 @@ document.getElementById('thId').textContent = cap(V.meta.item);
 
 document.getElementById('procs').innerHTML = V.processes.map(p=>`
   <div class="proc ${p.flagged?'flagged':''}">
-    <div class="pt">${esc(p.name)}</div>
+    <div class="pt">${esc(p.name)}${p.project?' <span class="ptag">project — happened once</span>':''}</div>
     <div class="pmeta">${p.count} ${esc(V.meta.items)}${p.actors.length?' · '+p.actors.map(esc).join(', '):''}</div>
     ${p.why?`<div class="pwhy"><b>Why these are one process (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
     ${p.flow.length?`<div class="plabel">The steps this process is made of, in the order they usually happen</div>
@@ -861,7 +882,7 @@ document.getElementById('procs').innerHTML = V.processes.map(p=>`
     <div class="paths">${p.paths.map(pa=>`
       <div class="path ${pa.rare?'rare':''}"><span class="cnt">${pa.count}×</span>
         <div class="bar" style="width:${pa.width}px"></div>
-        <span class="seq">${pa.seq.map(esc).join(' → ')||'—'}</span>
+        <span class="seq">${pa.seq.map(esc).join(' → ')||'—'}${pa.n_traces>1?` <span class="ntr">(${pa.n_traces} exact routes)</span>`:''}</span>
         <span class="lbl">${esc(pa.label)}</span></div>`).join('')}</div>
   </div>`).join('');
 
