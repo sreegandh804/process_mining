@@ -895,14 +895,30 @@ def _reproject(m, abstraction: "Abstraction", log=None) -> None:
     # 1. the spine — consecutive records realising one activity are one step,
     #    matching exactly how the inspector folds them. Done FIRST, because
     #    segment() reads each case's trace to compute its variants.
+    #
+    #    A record the reading DECLINED contributes no step. It kept its source's
+    #    own verb, which is the honest thing to hold about it, but that verb is
+    #    the absence of a claim and putting it in the spine states the opposite:
+    #    it makes `Sent` a stage of the process, gives the variant counter a step
+    #    that means "unknown", and hands `infer_missing_step_gaps` a common path
+    #    with a hole shaped like a step. The record is not dropped — it stays on
+    #    its case, in the run detail, in model.json, and in the abstention count
+    #    the inspector prints. It just does not get to be a stage.
+    read_ran = bool(abstraction.by_record)
+
+    def step_of(event_id):
+        if read_ran:
+            rec = abstraction.by_record.get(event_id)
+            return rec["activity"] if rec else None
+        return activity(event_id)
+
     for case in m.cases.values():
         seq: list[str] = []
         for eid in case.ordered_event_ids:
-            act = activity(eid)
+            act = step_of(eid)
             if act and (not seq or seq[-1] != act):
                 seq.append(act)
-        if seq:
-            case.trace_signature = tuple(seq)
+        case.trace_signature = tuple(seq)
 
     # 2. the kinds, re-clustered on what each run was READ to be about
     abstraction.by_case = _process_of_case(m, abstraction)

@@ -438,3 +438,53 @@ def test_a_corpus_smaller_than_the_sample_is_taken_whole():
     assert _spread([1, 2, 3], 150) == [1, 2, 3]
     assert _spread([], 150) == []
     assert _spread([1, 2, 3], 0) == []
+
+
+# --- a skipped step is a finding; a kind with no usual way is not -------------
+
+def test_a_run_that_jumps_a_step_everyone_else_takes_is_a_gap():
+    """The hiring case: CV screened, offer made, no interview in between.
+
+    Expectation is per STEP, not per whole trace. These four runs share no trace
+    at all, yet `Reviewed` is plainly normal and the first run plainly skipped
+    it — and that skip is the finding this detector exists for.
+    """
+    from induction.process import ProcessKind, Variant
+    from induction.steps.gaps_generic import _canonical_order
+
+    kind = ProcessKind(id="k", name="k", rationale="", confidence=None, variants=[
+        Variant(signature=("Screened", "Offered"), frequency=1, case_ids=["a"]),
+        Variant(signature=("Screened", "Reviewed", "Offered"), frequency=1, case_ids=["b"]),
+        Variant(signature=("Screened", "Reviewed", "Offered", "Hired"), frequency=1,
+                case_ids=["c"]),
+    ])
+    canon = _canonical_order(kind)
+    assert canon == ["Screened", "Reviewed", "Offered"], canon
+    assert "Hired" not in canon, "one run in three is not an expectation"
+
+
+def test_a_step_only_one_run_takes_is_not_expected_of_the_others():
+    """The other half of the same rule. The claim a gap makes is 'the other runs
+    did this and yours did not', so the other runs must be most of them."""
+    from induction.process import ProcessKind, Variant
+    from induction.steps.gaps_generic import _canonical_order
+
+    kind = ProcessKind(id="k", name="k", rationale="", confidence=None, variants=[
+        Variant(signature=("A", "B"), frequency=5, case_ids=[]),
+        Variant(signature=("A", "Z", "B"), frequency=1, case_ids=[]),
+    ])
+    assert _canonical_order(kind) == ["A", "B"]
+
+
+def test_a_kind_with_no_shared_step_expects_nothing():
+    """Six runs with nothing in common cannot accuse each other of anything. The
+    old rule handed the LONGEST run to the detector as the standard, so five runs
+    were reported missing a dozen steps each."""
+    from induction.process import ProcessKind, Variant
+    from induction.steps.gaps_generic import _canonical_order
+
+    kind = ProcessKind(id="k", name="k", rationale="", confidence=None, variants=[
+        Variant(signature=tuple(f"S{i}{j}" for j in range(i + 1)), frequency=1, case_ids=[])
+        for i in range(6)
+    ])
+    assert _canonical_order(kind) == []

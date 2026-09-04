@@ -103,6 +103,11 @@ class CorrelationPolicy:
     # Optional model-tier pass (embeddings + LLM). None => off, and the engine
     # stays fully deterministic and offline. See induction/semantic.py.
     semantic: Optional[SemanticProvider] = None
+    # Undo an over-eager guessed key (see steps/sessions.py). On by default: a
+    # case a weak key stretched across a year-long silence is wrong in every
+    # corpus, not merely untidy in one. Deterministic-key cases are never
+    # touched, so this is a no-op wherever the keys mean something.
+    split_quiet_sessions: bool = True
 
 
 # Pooled component text is capped so one enormous thread cannot dominate the
@@ -242,8 +247,19 @@ def correlate(shaped: Shaped, policy: CorrelationPolicy | None = None) -> Correl
 
     # ---- assemble ---------------------------------------------------------
     shaped.entities.extend(materialised.values())
-    return _build_cases(graph, entities, virtual, anchor_claims, attach, self_conf,
+    corr = _build_cases(graph, entities, virtual, anchor_claims, attach, self_conf,
                         island, bridge, events_by_entity, obs_by_entity)
+
+    # ---- pass 5: split a weak key that spans a silence ---------------------
+    # Every pass above JOINS. None of them can undo a join that a guessed key
+    # made too eagerly — and a guessed key (a shared subject, a shared title)
+    # has no idea whether it is looking at one run or twenty. See
+    # `steps/sessions.py`: it touches only cases whose weakest link is a guess,
+    # so a real key spanning a year is left exactly as it was.
+    if policy.split_quiet_sessions:
+        from induction.steps.sessions import split_quiet_sessions
+        split_quiet_sessions(corr, events_by_entity, obs_by_entity, policy)
+    return corr
 
 
 # ---------------------------------------------------------------------------
