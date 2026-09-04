@@ -321,6 +321,58 @@ def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False) -> dict:
         canon = list(min(sigs, key=lambda s: (len(s), s)))
     else:
         canon = list(max(sigs, key=lambda s: (sigs[s], len(s))))
+
+    # THE CARD'S HEADLINE IS THE PROCESS, NOT ONE RUN OF IT.
+    #
+    # `canon` above is the most frequent TRACE, and that is the right thing to
+    # label "most common" in the list of variants below. It is the wrong thing to
+    # put at the top of the card as the process's shape, and on a corpus with any
+    # abstention it collapses to a single chip: "Research Collaboration:
+    # Approved" — which means three of its runs had exactly one readable record
+    # and it happened to be an approval. Seven runs that between them show
+    # Requested, Approved and Escalated were summarised as one word.
+    #
+    # A process is its STEPS. Hiring is `Screened -> Interviewed -> Offered`; it
+    # is not whichever single stage the most candidates happen to share. So the
+    # headline is every step this kind's runs perform, ordered by where those
+    # runs typically put it — the same ordering `gaps_generic._canonical_order`
+    # uses, minus its majority bar, because describing a process is a weaker
+    # claim than accusing a run of skipping part of one.
+    #
+    # The variant list underneath still carries what actually happened, run by
+    # run, so the summary can never be mistaken for a claim that every run took
+    # all of these steps.
+    # Ordering comes only from runs that HAVE an order. A one-step run says
+    # nothing about where its step belongs — but scored naively it says
+    # "position 0.0", so any step that often appears alone gets dragged to the
+    # front: seven Research Collaboration runs came out `Approved -> Requested
+    # -> Escalated`, approved before requested, purely because three runs had a
+    # lone approval in them. Such runs still contribute the STEP; they just do
+    # not get a vote on where it goes.
+    seen_steps: dict[str, int] = defaultdict(int)
+    where: dict[str, list[float]] = defaultdict(list)
+    for rv in runs_with_steps:
+        seq = read_seq(rv)
+        for step in seq:
+            seen_steps[step] += 1
+        if len(seq) < 2:
+            continue
+        span = len(seq) - 1
+        for i, step in enumerate(seq):
+            where[step].append(i / span)
+
+    def _at(step):
+        # A step only ever seen alone sorts last rather than first: we know it
+        # happens, and we do not know when.
+        return sum(where[step]) / len(where[step]) if where.get(step) else 1.1
+
+    flow = sorted(seen_steps, key=lambda st: (_at(st), -seen_steps[st], st))
+
+    # The leftover kind is not a process and must not be drawn as one. Its runs
+    # are the ones the reading declined to place; a flow across them would be a
+    # shape assembled from whatever happened to be readable in a reject pile.
+    if leftover:
+        flow = []
     paths = [{
         "count": freq,
         "seq": list(sig),
@@ -334,7 +386,8 @@ def _process_view(k, m, kind_label, kind_runs, read_ran: bool = False) -> dict:
         "name": kind_label(k),
         "count": len(k.case_ids),
         "actors": [a for a, _ in actors.most_common(6)],
-        "flow": canon,
+        "flow": flow,
+        "canon": canon,
         "paths": paths,
         # Said out loud rather than left for a reader to infer from N paths at 1x.
         "no_common": no_common,
@@ -663,6 +716,8 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .proc .pmeta{color:var(--ink-2);font-size:13px;margin-top:2px}
   .proc .pwhy{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:8px;
     padding-left:10px;border-left:2px solid var(--line)}
+  .proc .plabel{color:var(--ink-3);font-size:11px;text-transform:uppercase;
+    letter-spacing:.05em;font-weight:600;margin-top:14px}
   .proc .pnone{color:var(--ink-2);font-size:12px;line-height:1.5;margin-top:10px;
     padding:8px 10px;background:var(--bg);border-radius:8px}
   .flag-note{font-size:13px;color:var(--flag);background:var(--attn-soft);border-radius:8px;padding:9px 12px;margin-top:12px}
@@ -771,8 +826,9 @@ document.getElementById('procs').innerHTML = V.processes.map(p=>`
     <div class="pt">${esc(p.name)}</div>
     <div class="pmeta">${p.count} ${esc(V.meta.items)}${p.actors.length?' · '+p.actors.map(esc).join(', '):''}</div>
     ${p.why?`<div class="pwhy"><b>Why these are one process (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
-    ${p.flow.length?`<div class="flow">${p.flow.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${esc(s)}</span>`).join('')}</div>`:''}
-    ${p.no_common?`<div class="pnone">No usual way. Every ${esc(V.meta.item)} here took a different path \u2014 ${p.n_paths} of them, each seen once. All are listed below.</div>`:''}
+    ${p.flow.length?`<div class="plabel">The steps this process is made of, in the order they usually happen</div>
+    <div class="flow">${p.flow.map((s,i)=>`${i?'<span class="arrow">→</span>':''}<span class="step">${esc(s)}</span>`).join('')}</div>`:''}
+    ${p.no_common?`<div class="pnone">No usual way. Every ${esc(V.meta.item)} here took a different path through those steps \u2014 ${p.n_paths} of them, each seen once. All are listed below.</div>`:''}
     ${p.n_unread?`<div class="pnone">The path above is the steps that were <b>read</b>. ${p.n_unread} of this process\u2019s ${p.n_records} records were declined by the model and keep the source\u2019s own verb, so they are counted here rather than drawn as steps${p.n_runs_unread?` (${p.n_runs_unread} ${esc(p.n_runs_unread===1?V.meta.item:V.meta.items)} had no step read at all)`:''}.</div>`:''}
     ${p.flagged?`<div class="flag-note"><b>Grouped separately.</b> ${esc(p.flag_note)}</div>`:''}
     <div class="paths">${p.paths.map(pa=>`

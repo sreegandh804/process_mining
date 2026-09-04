@@ -308,12 +308,31 @@ def test_reading_the_records_finds_the_real_processes(families):
 
 
 def test_each_process_has_the_steps_its_records_evidence(families):
+    """The card's headline is the process's STEPS, in the order runs put them —
+    not one run's trace. A step set does not repeat a step; the repetition lives
+    in the variants below, where it belongs."""
     _, _, view, _ = families
-    flow = {p["name"]: p["flow"] for p in view["processes"]}
-    # The second reviewer folds into one Reviewed step; the second chase does not
-    # fold, because it is not adjacent to the first.
-    assert flow["Contract execution"] == ["Requested", "Reviewed", "Approved", "Executed"]
-    assert flow["Invoice dispute"] == ["Chased", "Disputed", "Chased", "Settled"]
+    procs = {p["name"]: p for p in view["processes"]}
+    assert procs["Contract execution"]["flow"] == [
+        "Requested", "Reviewed", "Approved", "Executed"]
+    assert procs["Invoice dispute"]["flow"] == ["Chased", "Disputed", "Settled"]
+    # …and the second chase is still on the record, in the run's own path.
+    seqs = {tuple(pa["seq"]) for pa in procs["Invoice dispute"]["paths"]}
+    assert ("Chased", "Disputed", "Chased", "Settled") in seqs
+
+
+def test_the_headline_is_not_one_runs_trace(families):
+    """The bug this replaced: the headline was the most frequent TRACE, so on any
+    corpus with abstention it collapsed to a single chip — a seven-run process
+    whose runs show Requested, Approved and Escalated was summarised as
+    "Approved", because three runs happened to have one readable record each."""
+    _, _, view, _ = families
+    for p in view["processes"]:
+        if p["tier"] != "model":
+            continue
+        steps_seen = {s for pa in p["paths"] for s in pa["seq"]}
+        assert set(p["flow"]) == steps_seen, (
+            f"{p['name']}: headline {p['flow']} drops steps its runs perform")
 
 
 def test_a_read_boundary_says_it_is_model_tier_and_why(families):
