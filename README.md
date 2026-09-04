@@ -70,9 +70,9 @@ clone, no network, no key needed.
 
 | sample | what the data is | run it |
 |---|---|---|
-| **`samples/finance/`** | A small firm's **invoice approval & payment**: an invoice tracker (raised → submitted → approved → paid) plus a **bank payments** export that cross-references it on `invoice_id`. Deliberately messy — blank dates, a duplicate row, three date formats, a payment for an invoice that doesn't exist. | `python run_tabular.py` |
-| **`samples/grants/`** | A **grant-making tracker** (applied → reviewed → decided → paid → reported). A second, unrelated domain through the same engine — a new `TableSpec`, not new code. | `python run_tabular.py --dir samples/grants` |
-| **`samples/enron/`** | **263 real emails** from 3 Enron custodians (`kaminski-v`, `germany-c`, `jones-t`), curated so every subject-thread is a **complete conversation** — 76 threads, all ≥2 messages, no stray singletons (the engine induces 57 runs, 0 orphans). The genuine thin end: real RFC-822 with **no `In-Reply-To` headers at all**, so threads are earned from subject + fuzzy text/time, not a given key. | `python run_email.py --path samples/enron` |
+| **`samples/finance/`** | A small firm's **invoice approval & payment**: an invoice tracker (raised → submitted → approved → paid) plus a **bank payments** export that cross-references it on `invoice_id`. Deliberately messy — blank dates, a duplicate row, three date formats, a payment for an invoice that doesn't exist. | `python3 run_tabular.py` |
+| **`samples/grants/`** | A **grant-making tracker** (applied → reviewed → decided → paid → reported). A second, unrelated domain through the same engine — a new `TableSpec`, not new code. | `python3 run_tabular.py --dir samples/grants` |
+| **`samples/enron/`** | **263 real emails** from 3 Enron custodians (`kaminski-v`, `germany-c`, `jones-t`), curated so every subject-thread is a **complete conversation** — 76 threads, all ≥2 messages, no stray singletons (the engine induces 57 runs, 0 orphans). The genuine thin end: real RFC-822 with **no `In-Reply-To` headers at all**, so threads are earned from subject + fuzzy text/time, not a given key. | `python3 run_email.py --path samples/enron` |
 
 The Enron sample is a subset of the public
 **[Enron email dataset](https://www.kaggle.com/datasets/wcukierski/enron-email-dataset)**
