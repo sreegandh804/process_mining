@@ -53,6 +53,11 @@ def main(argv=None) -> int:
                          "deterministic baseline). 'llm' insists on it.")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic baseline (raw verbs, no AI naming/abstraction)")
+    ap.add_argument("--no-judge", action="store_true",
+                    help="keep the reading tier but turn off the semantic same-work judge, so "
+                         "correlation is fully deterministic (subject threads + silence split). "
+                         "Use when measuring the reading: the judge is the one non-deterministic "
+                         "input to case boundaries, and on a small-team mailbox it over-joins.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
@@ -74,7 +79,8 @@ def main(argv=None) -> int:
         print("[run] no messages parsed — is this a maildir/.mbox/.csv?", file=sys.stderr)
         return 2
 
-    m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=tier.semantic(log=prog)),
+    judge = None if args.no_judge else tier.semantic(log=prog)
+    m = induce(shaped, slug=slug, policy=CorrelationPolicy(semantic=judge),
                manifest={"source_kind": "email", "n_messages": n_messages}, progress=prog)
     # Abstraction runs BEFORE naming: reading the records can re-segment the
     # corpus (`abstraction._reproject`), and a namer that ran first would hand
