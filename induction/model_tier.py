@@ -42,6 +42,19 @@ def _have_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def _have_jev_key() -> bool:
+    """The typed tier is keyed separately and is strictly optional.
+
+    There is no downshift note for a missing Jev key, and that asymmetry is
+    deliberate. The Claude key decides whether the model tier RAN — a run without
+    it is a different run, and saying so loudly is the whole point of this module.
+    A missing Jev key changes nothing about what the run claims: the same calls
+    are made, the same readings produced, the same evidence shown. It costs more.
+    Nobody needs a warning about a cheaper path not being taken.
+    """
+    return bool(os.environ.get("OPENROUTER_API_KEY"))
+
+
 def _have_sdk() -> bool:
     try:
         import anthropic  # noqa: F401
@@ -62,9 +75,20 @@ class ModelTier:
     active: bool
     label: str
     hybrid: bool = False
+    # The typed tier (Jev). Independent of `active` in principle, but only ever
+    # switched on beside it here: every one of its uses narrows a generative call,
+    # so with no generative tier to narrow there is nothing for it to do.
+    typed: bool = False
 
     def names_enable(self) -> bool:
         return self.active
+
+    def reading(self, log=None):
+        """The typed tier for the reading pass, or None when it is off."""
+        if not (self.active and self.typed):
+            return None
+        from induction.jev_reading import JevReading
+        return JevReading(log=log)
 
     def mapper(self, log=None):
         """Tier-1 activity mapper (verbs -> activities), or None when off."""
@@ -86,18 +110,33 @@ class ModelTier:
         use it."""
         if not self.active:
             return None
-        from induction.semantic import AnthropicJudge, SemanticProvider, VoyageEmbedder
+        from induction.semantic import (AnthropicJudge, GatedJudge, SemanticProvider,
+                                        VoyageEmbedder)
+        judge = AnthropicJudge(log=log)
+        if self.typed:
+            # A gate in front, not a replacement: the judge still writes the
+            # sentence the join carries, and a pair the gate cannot read is a
+            # pair the judge sees exactly as it did before.
+            judge = GatedJudge(judge, log=log)
         if self.hybrid:
-            return SemanticProvider(judge=AnthropicJudge(log=log), embedder=VoyageEmbedder())
-        return SemanticProvider(judge=AnthropicJudge(log=log))
+            return SemanticProvider(judge=judge, embedder=VoyageEmbedder())
+        return SemanticProvider(judge=judge)
 
 
-def resolve(mode: str = "auto", *, no_llm: bool = False, stream=None) -> ModelTier:
+def resolve(mode: str = "auto", *, no_llm: bool = False, no_jev: bool = False,
+            stream=None) -> ModelTier:
     """Decide whether the model tier runs for this invocation.
 
     `mode` is a runner flag value: "auto" (default, on-if-available),
     "off"/"none", "on"/"llm", or "hybrid". `no_llm=True` (a `--no-llm` switch)
     forces off and wins over `mode`.
+
+    `no_jev=True` (a `--no-jev` switch) turns off the typed tier while leaving the
+    generative one exactly as it was. That switch exists to be MEASURED against:
+    the typed tier changes which records the expensive pass reads, and whether
+    that helps or hurts is a question about a corpus, not a question of opinion.
+    Running the same corpus both ways and comparing `n_unclassified` is how the
+    answer is got, so both ways have to remain one flag apart.
 
     Returns a `ModelTier`. Raises `SystemExit(2)` only when the model was asked
     for *by name* (`llm`/`hybrid`) and cannot run — never for the default path.
@@ -120,8 +159,10 @@ def resolve(mode: str = "auto", *, no_llm: bool = False, stream=None) -> ModelTi
         problems.append("the Anthropic SDK is missing (pip install anthropic)")
 
     if not problems:
-        label = "on (Claude)" + (" + embedding shortlist" if hybrid else "")
-        return ModelTier(active=True, label=label, hybrid=hybrid)
+        typed = _have_jev_key() and not no_jev
+        label = ("on (Claude" + (" + Jev" if typed else "") + ")"
+                 + (" + embedding shortlist" if hybrid else ""))
+        return ModelTier(active=True, label=label, hybrid=hybrid, typed=typed)
 
     if insist:
         # The model was requested explicitly — do not quietly hand back a

@@ -97,3 +97,79 @@ def test_judge_trips_after_sustained_overload(monkeypatch):
     # Once tripped, further pairs return immediately without touching the API.
     assert j.judge("c", "d") is None
     assert j.skipped == 1                    # not incremented — short-circuited
+
+
+# --- the generative calls stream ---------------------------------------------
+#
+# The three big-ceiling calls (the verb map at 8k, discovery at 8k, classification
+# at 16k) hold a connection open for as long as the model thinks, and the reading
+# pass now runs several of them at once. Blocking on that is how a real run
+# started reporting APITimeoutError instead of readings, so they stream.
+#
+# These pin the switch rather than the API: a fake client that offers only
+# `.stream()` would fail loudly against a call that still used `.create()`.
+
+class _Stream:
+    """A minimal stand-in for the SDK's streaming context manager."""
+
+    def __init__(self, message, seen):
+        self._message = message
+        self._seen = seen
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        self._seen.append("get_final_message")
+        return self._message
+
+
+def _streaming_client(text: str, seen: list):
+    message = type("M", (), {
+        "content": [type("B", (), {"type": "text", "text": text})()],
+        "stop_reason": "end_turn",
+    })()
+
+    class _Msgs:
+        def stream(self, **kw):
+            seen.append(kw)
+            return _Stream(message, seen)
+
+        def create(self, **kw):                     # must never be reached
+            raise AssertionError("this call must stream, not block")
+
+    return type("C", (), {"messages": _Msgs()})()
+
+
+def test_the_reading_pass_streams(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-present")
+    seen = []
+    monkeypatch.setattr("induction.anthropic_call.client",
+                        lambda **kw: _streaming_client('{"processes": []}', seen))
+
+    from induction.abstraction import AnthropicRecordClassifier
+    got, raw = AnthropicRecordClassifier()._call("sys", "content", max_tokens=16000)
+    assert got == {"processes": []}
+    assert raw == '{"processes": []}'
+    assert seen[0]["max_tokens"] == 16000
+    assert "get_final_message" in seen
+
+
+def test_the_verb_map_streams(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-present")
+    seen = []
+    monkeypatch.setattr("induction.anthropic_call.client",
+                        lambda **kw: _streaming_client('{"mail/sent": "Requested"}', seen))
+
+    from induction.abstraction import AnthropicActivityMapper
+    got = AnthropicActivityMapper().map(
+        [{"artefact": "mail", "action": "sent", "examples": []}])
+    assert got == {"mail/sent": "Requested"}
+
+
+# `naming.py`'s single 8k call got the same treatment and for the same reason;
+# its own path is already exercised through the injected `namer` seam, which is
+# the layer above the transport this pins.

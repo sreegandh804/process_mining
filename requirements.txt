@@ -17,3 +17,8 @@ pytest>=7.0
 # induced processes/steps). Needs ANTHROPIC_API_KEY. The engine names everything
 # from the raw activity verbs without it.
 # anthropic>=0.40
+
+# OPTIONAL, and needs NO package: the typed tier (Jev, via the OpenRouter
+# Decisions API) is reached with `urllib` from the standard library, so turning
+# it on is a key and nothing else. Needs OPENROUTER_API_KEY; `--no-jev` turns it
+# off again. See README "The typed tier".

@@ -105,16 +105,19 @@ class AnthropicActivityMapper(ActivityMapper):
             self._log("[abstraction] activity mapping needs the Anthropic SDK: pip install anthropic")
             return {}
         try:
-            msg = with_backoff(
-                lambda: api.messages.create(
+            def once():
+                # Streamed for the same reason the reading pass is — see `_call`.
+                with api.messages.stream(
                     model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
                     max_tokens=_MAP_TOKENS,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
                                "Vocabulary:\n" + json.dumps(vocab, indent=2) +
                                "\n\nReturn the JSON map."}],
-                ),
-                label="activity map", log=self._log)
+                ) as stream:
+                    return stream.get_final_message()
+
+            msg = with_backoff(once, label="activity map", log=self._log)
             text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
             got = _parse_map(text)
             present = {_key(v["artefact"], v["action"]) for v in vocab}
@@ -127,13 +130,15 @@ class AnthropicActivityMapper(ActivityMapper):
 
 def infer_activities(m, mapper: Optional[ActivityMapper],
                      classifier: "Optional[RecordClassifier]" = None,
-                     log=None) -> "Abstraction":
+                     log=None, jev=None) -> "Abstraction":
     """Name the corpus's activities — the verb map first, the record classifier
     only where the verb map had nothing to say.
 
     Returns an `Abstraction`. With no mapper and no classifier it is empty, and
     the engine shows raw artefacts, claiming no abstraction. `log` (a `msg->None`
-    sink) reports progress; default is silent.
+    sink) reports progress; default is silent. `jev` is the optional typed tier
+    (`jev_reading.JevReading`), which only ever narrows what the classifier is
+    asked — with it None, this function behaves exactly as it always has.
     """
     log = log or (lambda m: None)
     types = {e.id: e.type for e in m.shaped.entities}
@@ -156,7 +161,7 @@ def infer_activities(m, mapper: Optional[ActivityMapper],
     events = _events_needing_a_reading(m, by_vocab, types)
     if not events:
         return abstraction          # the verbs discriminated; nothing to read
-    _read_the_records(abstraction, m, events, classifier, log)
+    _read_the_records(abstraction, m, events, classifier, log, jev=jev)
     return abstraction
 
 
@@ -259,9 +264,24 @@ class Abstraction:
     # of the process, as distinct from what any particular run did.
     steps_by_process: dict[str, list[str]] = field(default_factory=dict)
     by_case: dict[str, str] = field(default_factory=dict)
+    # What the typed tier held back, when it ran. Two piles, kept apart on
+    # purpose, because they are two different findings: `gated` records perform
+    # no step to read, and `ambiguous` records fit several steps equally well.
+    # The second is new — before there was one pile, "declined", and a record
+    # nothing fitted was indistinguishable from a record everything fitted.
+    gated: list[dict] = field(default_factory=list)
+    ambiguous: list[dict] = field(default_factory=list)
+    # Per-pass counts for the run header, so no gate is ever silent.
+    jev_counts: dict = field(default_factory=dict)
 
     def __bool__(self) -> bool:
         return bool(self.by_vocab or self.by_record)
+
+    def confidence_of(self, event_id: str) -> Optional[float]:
+        """The typed tier's certainty in this record's step, when it ran. None
+        means no number was ever produced — never that the reading is weak."""
+        rec = self.by_record.get(event_id)
+        return rec.get("confidence") if rec else None
 
     def activity_of(self, event_id: str, artefact: str, action: str) -> Optional[str]:
         """The reading first, then the verb map, then nothing (caller falls back
@@ -578,6 +598,46 @@ def _record_text(ev, m) -> str:
     return _text_of(ent, DEFAULT_POLICY.fuzzy.text_attrs)[:1200]
 
 
+def _record_state(ev, m, entities: Optional[dict] = None) -> dict:
+    """The record as STRUCTURE, for a model that reads structure.
+
+    `_record_text` exists because the generative tier is handed one prose blob
+    and asked to recover the facts from it. That is a round trip this engine
+    never needed: the adapters already parsed those facts into typed fields, and
+    flattening them into a string only to have a model pull them back out is work
+    that can be wrong twice.
+
+    A typed question takes JSON, so it gets the fields as they are — the actor
+    and the timestamp under their own keys, each text attribute under its own
+    name, references as a list — and a question can then point at one of them
+    (`subject`, `refs`) instead of describing where in the blob to look.
+
+    Nothing here is inferred. Every value is something an adapter read off the
+    source, which is what keeps a question about this state a question about the
+    record rather than about a paraphrase of it.
+    """
+    if entities is None:
+        entities = {e.id: e for e in m.shaped.entities}
+    ent = entities.get(ev.entity_id)
+    if ent is None:
+        return {}
+    from induction.steps.correlate import DEFAULT_POLICY
+
+    state: dict = {"action": ev.action}
+    if ev.timestamp:
+        state["when"] = ev.timestamp
+    if ev.actor:
+        state["actor"] = ev.actor.split(":")[-1]
+    for key in DEFAULT_POLICY.fuzzy.text_attrs:
+        value = ent.attrs.get(key)
+        if isinstance(value, str) and value.strip():
+            state[key] = value[:900]
+    refs = ent.attrs.get("refs") or ent.attrs.get("references")
+    if isinstance(refs, (list, tuple)) and refs:
+        state["refs"] = [str(r) for r in refs[:8]]
+    return state
+
+
 def _spread(records: list, n: int) -> list:
     """`n` records drawn evenly across the corpus, not the first `n` of it.
 
@@ -600,8 +660,17 @@ def _spread(records: list, n: int) -> list:
     return [records[int(i * step)] for i in range(n)]
 
 
-def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=None) -> None:
-    """Discover the corpus's activity vocabulary, then read each record into it."""
+def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=None,
+                      jev=None) -> None:
+    """Discover the corpus's activity vocabulary, then read each record into it.
+
+    `jev` is an optional `jev_reading.JevReading` — the typed tier. It never
+    changes what this function produces, only how much of the generative tier is
+    paid for on the way: which records reach the expensive read, which proposed
+    labels survive, and which records go to the ambiguous pile with their numbers
+    instead of being read and declined. With `jev=None` every line below behaves
+    exactly as it did before it existed.
+    """
     log = log or (lambda m: None)
     records = []
     seen_ids = set()
@@ -616,16 +685,32 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
     if not records:
         return
 
+    # Every count below is reported against THIS number, not against whatever
+    # survives the gates. A gate explains part of the abstention; it must never
+    # be able to improve it by shrinking the denominator.
+    n_records = len(records)
+    signals: dict = {}
+    if jev is not None:
+        records, signals = jev.gate(abstraction, records, events, m, log)
+        if not records:
+            log("[abstraction] every record was gated as performing no step — "
+                "nothing to read, and the verbs stand")
+            jev.report(abstraction, log)
+            return
+
     distinct, capped = _cap_per_thread(records, m)
+    pool = jev.sample_pool(distinct, signals, log) if jev is not None else distinct
     log(f"abstraction: verbs are transport, reading {len(records)} records "
-        f"(discovering the vocabulary from a sample of {min(len(distinct), _DISCOVERY_SAMPLE)}"
+        f"(discovering the vocabulary from a sample of {min(len(pool), _DISCOVERY_SAMPLE)}"
         + (f"; {capped} records held back so no one thread floods it" if capped else "") + ")")
-    sample = [r["text"] for r in _spread(distinct, _DISCOVERY_SAMPLE)]
+    sample = [r["text"] for r in _spread(pool, _DISCOVERY_SAMPLE)]
     try:
         vocab = classifier.discover(sample)
     except Exception as e:                # the tier is a convenience, never a blocker
         log(f"[abstraction] activity discovery skipped ({type(e).__name__}: {e})")
         return
+    if jev is not None:
+        vocab = jev.screen_labels(vocab, log)
     activities = vocab.activities
     processes = vocab.processes
     if len(activities) < 2:
@@ -646,6 +731,22 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
         recs = [by_id[eid] for eid in case.ordered_event_ids if eid in by_id]
         if recs:
             threads.append({"id": case.id, "records": recs})
+
+    # The typed tier picks each record's step out of the vocabulary that now
+    # exists, and the records nothing clearly fits stop here with their numbers
+    # rather than travelling into a batch to be read and declined. What reaches
+    # the generative pass is a shorter list of records that have somewhere to go;
+    # what it does there is unchanged, and it is still the only thing that can
+    # quote the text a reading rests on.
+    placements: dict[str, object] = {}
+    if jev is not None:
+        threads, placements = jev.place(abstraction, threads, vocab, events, m, log)
+        if not threads:
+            log("[abstraction] the typed tier placed no record confidently — "
+                "nothing to read, and the verbs stand")
+            jev.report(abstraction, log)
+            return
+
     batches: list[list[dict]] = [[]]
     for th in threads:
         if batches[-1] and sum(len(t["records"]) for t in batches[-1]) + len(th["records"]) > _CLASSIFY_BATCH:
@@ -659,29 +760,58 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
     if vocab.loose:
         log(f"abstraction:   (belonging to no process: {', '.join(vocab.loose)})")
 
-    got: dict[str, dict] = {}
-    for b, batch in enumerate(batches, 1):
+    # The batches run CONCURRENTLY. No batch reads another's output — each is a
+    # separate set of threads read against the same fixed vocabulary — so running
+    # them one after another was eleven minutes of waiting for a minute of work.
+    # Same calls, same tokens, same cost, same readings; they just stop queueing.
+    # Bounded in flight, because an unbounded burst earns 429s and `with_backoff`
+    # turns those straight back into a queue.
+    from induction.concurrency import fan_out
+
+    def read_batch(numbered) -> dict:
+        b, batch = numbered
         n_rec = sum(len(t["records"]) for t in batch)
         log(f"abstraction: classifying batch {b}/{n_batches} ({len(batch)} threads, {n_rec} records)")
         try:
-            got.update(_clean_thread_readings(classifier.classify_threads(batch, vocab), batch, vocab))
-        except Exception as e:
+            return _clean_thread_readings(
+                classifier.classify_threads(batch, vocab), batch, vocab)
+        except Exception as e:                # noqa: BLE001 — one batch, never the run
+            # Caught HERE rather than left to `fan_out`, which would swallow the
+            # exception's text along with the exception. A batch that failed is a
+            # batch a reader needs named, with what it failed on.
             log(f"[abstraction] batch {b} skipped ({type(e).__name__}: {e})")
+            return {}
+
+    got: dict[str, dict] = {}
+    for readings in fan_out(read_batch, list(enumerate(batches, 1))):
+        got.update(readings or {})
 
     for proc, step, n in _detach_lonely_steps(got, m, vocab):
         log(f"[abstraction] detached {step!r} from {proc}: seen in {n} records across "
             f"3+ runs and never alongside another step of that process — not a stage")
 
+    if placements:
+        # The number the typed tier gave a reading travels WITH the reading, so a
+        # reader sees it beside the span rather than in a log line. It annotates a
+        # claim the generative pass made and evidenced; it never creates one.
+        for eid, reading in got.items():
+            placed = placements.get(eid)
+            confidence = getattr(placed, "confidence", None)
+            if confidence is not None:
+                reading["confidence"] = confidence
+
     abstraction.by_record = got
     abstraction.processes = processes
     abstraction.steps_by_process = dict(vocab.steps_by_process)
-    abstraction.n_unclassified = len(records) - len(got)
+    abstraction.n_unclassified = n_records - len(got)
     abstraction.vocabulary = _audit_rows(activities, got, abstraction.n_unclassified)
     n_with_process = sum(1 for r in got.values() if r.get("process"))
-    log(f"abstraction: read {len(got)} of {len(records)} records "
+    log(f"abstraction: read {len(got)} of {n_records} records "
         f"({abstraction.n_unclassified} declined) · {n_with_process} placed in a process")
+    if jev is not None:
+        jev.report(abstraction, log)
     if got:
-        _reproject(m, abstraction, log)
+        _reproject(m, abstraction, log, jev=jev)
 
 
 def _clean_readings(raw: dict, batch: list[dict], vocab: "ReadVocabulary") -> dict[str, dict]:
@@ -973,13 +1103,24 @@ class AnthropicRecordClassifier(RecordClassifier):
             return {}, ""
         from induction.anthropic_call import client, with_backoff
         api = client()
-        msg = with_backoff(
-            lambda: api.messages.create(
+
+        # STREAMED, not awaited in one blocking call. These ceilings are 8k and
+        # 16k, and a model that thinks before it answers can sit under one of
+        # them for minutes; a non-streaming request has to hold the connection
+        # open for the whole of that, and several of them at once is how a run
+        # starts reporting APITimeoutError instead of readings. Streaming keeps
+        # the connection fed while the model works. Nothing else changes — same
+        # prompt, same ceiling, same tokens, same reply; `get_final_message`
+        # hands back exactly what `create` would have returned.
+        def once():
+            with api.messages.stream(
                 model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
                 max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": content}],
-            ),
-            label="activity reading", log=self._log)
+            ) as stream:
+                return stream.get_final_message()
+
+        msg = with_backoff(once, label="activity reading", log=self._log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         if getattr(msg, "stop_reason", None) == "max_tokens":
             # A truncated reply is unparseable JSON, and unparseable JSON is an
@@ -1124,7 +1265,7 @@ def _process_of_case(m, abstraction: "Abstraction") -> dict[str, str]:
     return out
 
 
-def _reproject(m, abstraction: "Abstraction", log=None) -> None:
+def _reproject(m, abstraction: "Abstraction", log=None, jev=None) -> None:
     """Re-derive the kinds, the spine, the variants and the findings over what
     we just read.
 
@@ -1204,6 +1345,14 @@ def _reproject(m, abstraction: "Abstraction", log=None) -> None:
         kinds = segment(m.shaped, m.correlation, profile,
                         case_process=abstraction.by_case)
         apply_reject(kinds, profile)
+        if jev is not None and jev.available:
+            # A second opinion, only where the profile had none. The generic rule
+            # says outright that it cannot prove a cluster "produces nothing"
+            # without domain knowledge; this is the engine asking rather than
+            # leaving the question blank. It never overrides a profile's verdict
+            # and never un-flags one.
+            from induction.honesty import triage_unflagged
+            triage_unflagged(kinds, jev=jev.jev, log=log)
         m.kinds = kinds
         placed = len(abstraction.by_case)
         log(f"abstraction: re-segmented on what the records say — {before} kind(s) "

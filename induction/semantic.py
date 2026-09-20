@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 
@@ -155,6 +156,156 @@ class AnthropicJudge(SemanticJudge):
             reason = str(verdict.get("reason", "") or "model judged these the same work")
             return reason[:self.max_reason]
         return None
+
+
+# ---------------------------------------------------------------------------
+# The Jev gate — a typed verdict in front of the paid judge
+# ---------------------------------------------------------------------------
+
+# Two records, two questions, one call. Decomposed on purpose: "are these the
+# same work" and "if they are related, by what" are different judgements, and a
+# single broad question hides the second behind the first. Asking both costs one
+# round trip — questions over one state are evaluated in parallel — and the pair
+# is exactly what the engine's hardest failure mode needs: a high `same_work`
+# sitting on top of `same_subject` is the "two threads, one counterparty, weeks
+# apart" mistake, and it is invisible if you only ever see the boolean.
+_PAIR_QUESTIONS: dict = {
+    "same_work": {
+        "type": "noul",
+        "instructions": {
+            "question": "Are `a` and `b` records of the SAME piece of work?",
+            "focus": "One task, incident or change — not merely one subject.",
+        },
+        "criteria": {
+            "true": {
+                "what": "One piece of work seen from two places",
+                "examples": ["A bug report and the pull request that fixes it",
+                             "A request and the record of it being fulfilled"],
+            },
+            "false": {
+                "what": "Two separate runs of work, or nothing in common",
+                "not_for": "Two records of one run that happen to use different words",
+                "examples": ["Two invoices to one customer",
+                             "Two threads about one counterparty, weeks apart, "
+                             "with different people on them"],
+            },
+        },
+    },
+    "relation": {
+        "type": "choice",
+        "instructions": {
+            "question": "If `a` and `b` are connected at all, what connects them?",
+            "focus": "Name the strongest connection, not every connection.",
+        },
+        "criteria": {
+            "causal": {"what": "One exists because the other happened",
+                       "examples": ["A fix that exists because of a report"]},
+            "sequential": {"what": "Consecutive stages of one run of work",
+                           "examples": ["A quote, then the order placed against it"]},
+            "same_subject": {"what": "One topic, customer or component — separate runs",
+                             "not_for": "Two records of a single run",
+                             "examples": ["Two unrelated tickets about one product"]},
+            "same_actor": {"what": "The same people, on work that is not the same",
+                           "examples": ["One engineer's two unrelated changes"]},
+            "unrelated": {"what": "No meaningful connection", "examples": []},
+        },
+    },
+}
+
+
+@dataclass(frozen=True)
+class PairVerdict:
+    """What the gate learned about one candidate pair."""
+
+    same: float
+    relation: Optional[str] = None
+    relation_p: Optional[float] = None
+
+    def note(self) -> str:
+        """The one fragment appended to a join's reason, so the number a join
+        rests on travels with it everywhere the reason is shown."""
+        tail = f" · {self.relation}" if self.relation else ""
+        if self.relation and self.relation_p is not None:
+            tail = f" · {self.relation} {self.relation_p:.2f}"
+        return f"jev {self.same:.2f}{tail}"
+
+
+class JevGate:
+    """Scores a candidate pair before the generative judge is paid to read it.
+
+    This is the `Confidence-Gated Routing` shape: a cheap typed decision chooses
+    whether an expensive one happens. It is deliberately NOT a replacement for
+    the judge — the judge writes the one-line reason a `model`-tier join carries,
+    and a probability cannot be argued with the way a sentence can.
+
+    `bar` is where the gate stops a pair. It is set low on purpose: the gate's job
+    is to throw out the clearly-unrelated, not to make the call. A pair it passes
+    is still judged, and can still be refused.
+    """
+
+    def __init__(self, jev=None, bar: float = 0.40, log=None):
+        self._log = log or (lambda m: None)
+        if jev is None:
+            from induction.jev_call import Jev
+            jev = Jev(log=self._log)
+        self._jev = jev
+        self.bar = bar
+
+    @property
+    def available(self) -> bool:
+        return self._jev.available
+
+    def verdict(self, a_text: str, b_text: str) -> Optional[PairVerdict]:
+        """A typed reading of the pair, or None when Jev could not be reached —
+        and None must mean "no opinion", never "no": a gate that cannot run has
+        to let the pair through, or an unreachable service would silently delete
+        every model-tier join in the run."""
+        answers = self._jev.ask(
+            {"a": a_text[:1500], "b": b_text[:1500]}, _PAIR_QUESTIONS)
+        same = answers.get("same_work")
+        if same is None or same.noul is None:
+            return None
+        rel = answers.get("relation")
+        return PairVerdict(same=same.noul,
+                           relation=rel.choice if rel else None,
+                           relation_p=rel.confidence if rel else None)
+
+
+class GatedJudge(SemanticJudge):
+    """A `SemanticJudge` with a Jev gate in front of it.
+
+    The contract is unchanged — a reason string or None — so the correlator needs
+    no modification and the tiering is untouched: a join this produces is still
+    `model` tier, still overrulable, still unable to beat a stronger join. What
+    changes is how many pairs reach the paid judge, and that every join it does
+    make now carries the number the gate gave it.
+
+    Degrading is one-directional by design. No key, a tripped breaker, an
+    unparseable answer — all mean the underlying judge runs exactly as it did
+    before this class existed. The gate can only ever save a call, never cause a
+    join the judge did not make.
+    """
+
+    def __init__(self, judge: SemanticJudge, gate: Optional[JevGate] = None,
+                 bar: float = 0.40, log=None):
+        self._judge = judge
+        self._gate = gate if gate is not None else JevGate(bar=bar, log=log)
+        self.bar = bar
+        self.gated = 0      # pairs the gate answered for, so the judge never saw them
+        self.passed = 0     # pairs the gate let through to the judge
+
+    def judge(self, a_text: str, b_text: str) -> Optional[str]:
+        verdict = self._gate.verdict(a_text, b_text)
+        if verdict is None:
+            return self._judge.judge(a_text, b_text)   # no opinion: unchanged behaviour
+        if verdict.same < self.bar:
+            self.gated += 1
+            return None
+        self.passed += 1
+        reason = self._judge.judge(a_text, b_text)
+        if not reason:
+            return None
+        return f"{reason} [{verdict.note()}]"
 
 
 # ---------------------------------------------------------------------------
