@@ -90,3 +90,100 @@ def apply_reject(kinds: list[ProcessKind], profile: Profile = GENERIC_PROFILE) -
         if reason:
             kind.rejected = True
             kind.reject_reason = reason
+
+
+# ---------------------------------------------------------------------------
+# The typed second opinion, where the profile has none
+# ---------------------------------------------------------------------------
+
+# Three narrow questions, because "is this a real process" is three judgements.
+# The generic rule above can only see that a cluster is automated and recurs; it
+# says outright that it "cannot prove it produces nothing without domain
+# knowledge". These ask the part it cannot: does anything of value come out.
+_TRIAGE_QUESTIONS: dict = {
+    "produces_an_artefact": {
+        "type": "noul",
+        "instructions": {
+            "question": "Do the runs of this cluster produce or change something "
+                        "the organisation keeps?",
+            "focus": "An outcome that outlives the run — not a notification about one.",
+        },
+        "criteria": {
+            "true": {"what": "A document, record, decision or change of state results",
+                     "examples": ["A bot that opens a pull request changing code",
+                                  "An automated invoice actually being issued"]},
+            "false": {"what": "Only a notification, log line or status ping results",
+                      "not_for": "An automated run that really does change something",
+                      "examples": ["A nightly build notice", "A recurring reminder"]},
+        },
+    },
+    "verdict": {
+        "type": "choice",
+        "instructions": {
+            "question": "Is this cluster a real process, or something that merely "
+                        "looks like one?",
+            "focus": "Recurring shape is not enough; ask what the runs accomplish.",
+        },
+        "criteria": {
+            "real_process": {"what": "Work the organisation means to do, that produces "
+                                     "something of the value the process exists for"},
+            "machine_noise": {"what": "A recurring automated pattern that moves no "
+                                      "product artefact and produces nothing of value",
+                              "examples": ["Dependency bumps that change no code",
+                                           "CI or formatting churn"]},
+            "ambiguous": {"what": "Genuinely cannot be told apart from the evidence shown"},
+        },
+    },
+}
+
+
+def triage_unflagged(kinds: list[ProcessKind], jev=None, log=None) -> int:
+    """Ask the typed tier about the clusters the profile had no opinion on.
+
+    Strictly additive, in three ways that matter:
+
+      - it never touches a kind the profile already flagged, because a domain
+        rule is knowledge and this is an opinion, and knowledge wins;
+      - it never un-flags anything, for the same reason;
+      - it flags only on `machine_noise` won clearly, and says in the reason
+        itself that a model said so, with the number — so a reader can disagree
+        with it exactly as they can disagree with the profile's own wording.
+
+    `apply_reject` still only ever FLAGS. Nothing here deletes a kind, and the
+    runs stay inspectable, which is the whole reason the reject pile is shown
+    rather than filtered away. Returns how many kinds it flagged.
+    """
+    log = log or (lambda m: None)
+    if jev is None:
+        from induction.jev_call import Jev
+        jev = Jev(log=log)
+    if not jev.available:
+        return 0
+
+    flagged = 0
+    for kind in kinds:
+        if kind.rejected:
+            continue                      # the profile already knows; leave it alone
+        state = {"cluster": {"name": kind.name, "rationale": kind.rationale,
+                             "n_runs": len(kind.case_ids),
+                             "steps": kind.steps[:12], "features": kind.features}}
+        answers = jev.ask(state, _TRIAGE_QUESTIONS)
+        verdict = answers.get("verdict")
+        produces = answers.get("produces_an_artefact")
+        if verdict is None or verdict.choice != "machine_noise":
+            continue
+        if not verdict.sure(0.70):
+            continue                      # a tie is not a finding
+        if produces is not None and produces.noul is not None and produces.noul >= 0.5:
+            continue                      # it does produce something: not noise
+        kind.rejected = True
+        kind.reject_reason = (
+            f"No source profile has a rule for this cluster, so a model was asked: it "
+            f"reads these {len(kind.case_ids)} runs as a recurring pattern that moves no "
+            f"product artefact and produces nothing of the value a process exists for "
+            f"(confidence {verdict.confidence:.2f}). This is inference, not a rule — "
+            f"flagged, not deleted, and the runs remain inspectable.")
+        flagged += 1
+        log(f"[honesty] flagged {kind.name!r} as a look-alike non-process "
+            f"(model, {verdict.confidence:.2f}) — no profile rule covered it")
+    return flagged

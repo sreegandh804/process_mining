@@ -112,6 +112,67 @@ runs the pass that derives the corpus's vocabulary, and everything downstream is
 graded against it. `INDUCTION_SEMANTIC_MODEL` is a narrow same-work-or-not
 verdict repeated a couple of hundred times, which is why it defaults cheaper.
 
+### The typed tier (optional): Jev in front of Claude
+
+A second, different kind of model can sit in front of the calls above. Jev
+(TypeSafe's "System One", via the OpenRouter Decisions API) generates no text at
+all: it is handed a `state` and a dict of typed questions, and returns one typed
+answer per question, drawn only from options you supplied — a calibrated
+probability (`noul`), one label from a set you named plus the full distribution
+over it (`choice`), or a place on a rubric you wrote (`score`).
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+
+python3 run_email.py --path samples/enron           # both tiers
+python3 run_email.py --path samples/enron --no-jev  # exactly as before it existed
+```
+
+It is opt-in by key and changes nothing about what a run claims, so there is no
+downshift note when it is absent — unlike a missing `ANTHROPIC_API_KEY`, which
+changes what the run *is* and says so loudly.
+
+**Where it runs, and why only there.** Jev is used at five points, and every one
+of them is a question whose answer set already exists:
+
+| Where | Question | Type |
+| --- | --- | --- |
+| `semantic.py` | same piece of work? and if related, by what? | noul + choice |
+| `abstraction.py` gate | does this record perform any step? | noul |
+| `abstraction.py` sample | does this record carry the work? | noul |
+| `abstraction.py` labels | is this label an achievement, or the envelope? | score |
+| `abstraction.py` assign | which `Process > Step` does this record perform? | choice |
+| `honesty.py` | is this cluster a process, where no profile has a rule? | choice |
+
+**Where it deliberately does not run.** Discovery — the pass that invents the
+vocabulary — stays on Claude, because a Choice needs its options to exist and on
+a fresh corpus they do not. So does every call that has to quote its evidence: a
+typed answer is a value, never a sentence, so Jev can produce no `span`, no join
+reason and no name. Everywhere this engine shows a claim *with* the text it was
+read from, the generative model still writes that text. Jev goes in front of
+that call to narrow it, never instead of it. The deterministic spine — parsing,
+shared-key joins, the co-occurrence arithmetic in `_detach_lonely_steps` — is
+untouched and unscored: a number beside a fact would make the fact look like an
+opinion.
+
+**What it adds that was not expressible before.** A `choice` returns the whole
+distribution, so a record several steps fit *equally* is now a different finding
+from a record nothing fits. Both used to arrive at the same place — dropped, and
+counted as declined. They are now two piles with two reasons, and the ambiguous
+one is shown with what it was torn between.
+
+**The rule the tests pin.** The typed tier can only ever *narrow*. A missing key,
+an unreachable service, a tripped breaker or a silent answer must leave the
+engine doing precisely what it did before this existed — silence is never a "no".
+`tests/test_jev.py` asserts that directly, by running the same corpus with a dead
+Jev and comparing the readings byte for byte.
+
+**Whether it helps is a question about your corpus, not an opinion.** It changes
+which records the expensive pass reads, and that can go either way — Claude reads
+a whole thread and reasons about it; Jev picks from a list. `--no-jev` exists so
+both paths stay one flag apart: run your corpus twice and compare
+`n_unclassified` before trusting either.
+
 Progress streams to stderr as it goes, so a multi-minute run is never a silent
 wait — including the line that matters most:
 

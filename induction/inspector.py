@@ -38,7 +38,12 @@ _ITEM_WORDS = {
 
 def build_view(m: InducedModel, names: dict | None = None, activities: dict | None = None) -> dict:
     names = names or {}
-    activities = activities or {}
+    # `is None`, not `or {}`. An `Abstraction` is falsy when it read nothing, and
+    # an abstraction that read nothing is exactly the one with the most to say:
+    # it still carries the gated pile, the ambiguous pile and the counts. The
+    # truthiness test threw all of that away and left the page silent about why
+    # nothing was read.
+    activities = {} if activities is None else activities
     shaped = m.shaped
     events_by_id = {e.id: e for e in shaped.events}
     obs_by_id = {o.id: o for o in shaped.observations}
@@ -185,6 +190,9 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
             "scope": disclaimers_for(m),
             "ai_named": bool(names.get("_ai")),
             "ai_steps": bool(abstraction),
+            # Every gate the typed tier applied, counted. A gate nobody can see
+            # the size of is the thing this engine exists not to have.
+            "jev": dict(abstraction.jev_counts),
             "item": item, "items": items,
         },
         "processes": processes,
@@ -250,6 +258,26 @@ def _naming_provenance(m, abstraction) -> list[dict]:
         rows.append({"activity": "Unclassified", "n": abstraction.n_unclassified,
                      "tier": "", "phrases": [], "unclassified": True, "n_read": 0,
                      "how": "the model would not commit — kept the source's own verb"})
+    # Two reasons a record went unread, split out of that one bucket. They are
+    # different findings and a reader can act on them differently: a gated record
+    # performed nothing, and an ambiguous record performed something the engine
+    # could not tell apart from something else. Both stayed in the corpus.
+    if abstraction.gated:
+        rows.append({"activity": "Gated (performs no step)", "n": len(abstraction.gated),
+                     "tier": "", "phrases": [], "unclassified": True, "n_read": 0,
+                     "how": "a greeting, a bare forward or an acknowledgement — held back "
+                            "from the reading rather than read and declined"})
+    if abstraction.ambiguous:
+        examples = []
+        for row in abstraction.ambiguous[:4]:
+            top = ", ".join(f"{name} {p:.2f}" for name, p in row.get("top", [])[:3])
+            if top:
+                examples.append(top)
+        rows.append({"activity": "Ambiguous (fits several steps)",
+                     "n": len(abstraction.ambiguous), "tier": "", "phrases": examples,
+                     "unclassified": True, "n_read": 0,
+                     "how": "no step stood out — shown with what it was torn between, "
+                            "rather than dropped"})
     return rows
 
 
@@ -596,6 +624,12 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
                 # A read activity shows the span it was read from: the difference
                 # between a claim you can check and one you have to accept.
                 "who": who, "inferred": False, "note": abstraction.span_of(ev.id) or "",
+                # The typed tier's certainty in THIS step, when it ran. It sits
+                # beside the span, never instead of it: the span is the evidence
+                # and can be checked, the number is only how sure a model was.
+                # Absent for every reading made without it, which is correct —
+                # no number is not a low number.
+                "conf": abstraction.confidence_of(ev.id),
                 "src": src, "is_url": src.startswith("http"),
                 "src_kind": _SRC_WORD.get(ev.source.split(":")[0], ev.source.split(":")[0]),
             })
@@ -758,6 +792,9 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   h1{font:400 30px/1.2 var(--serif);letter-spacing:-.01em;margin:0 0 8px}
   .lede{max-width:66ch;color:var(--ink-2);margin:0 0 16px}
   .ai{font-size:12px;color:var(--read);background:var(--read-bg);border-radius:4px;padding:1px 7px;margin-left:6px}
+  /* Only ever rendered beside a quoted span, and never on a deterministic join:
+     a number on a fact would make the fact look like an opinion. */
+  .conf{font-size:11.5px;color:var(--ink-3);border:1px solid var(--rule);border-radius:4px;padding:0 5px;margin-left:8px;vertical-align:1px}
   .stats{display:flex;flex-wrap:wrap;gap:0 18px;align-items:baseline;font-size:13.5px;color:var(--ink-2);border-top:1px solid var(--rule);padding:11px 0 13px}
   .stats b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
   .stats .disclose{margin-left:auto;color:var(--open);background:none;border:1px solid var(--open);border-radius:6px;padding:2px 9px;font:inherit;cursor:pointer}
@@ -882,7 +919,7 @@ function renderRail(){
 
 // One artefact = one piece of evidence, opening to its source record.
 const art = a => `<div class="ev ${a.inferred?'inf':''}">
-  <span><span class="evref">${esc(a.artefact)}${a.ref?' '+esc(a.ref):''}</span> <span class="evverb">${esc(a.verb)}${a.who?' · '+esc(a.who):''}</span>${a.note?`<div class="quote" style="margin:4px 0 0">${esc(a.note)}</div>`:''}</span>
+  <span><span class="evref">${esc(a.artefact)}${a.ref?' '+esc(a.ref):''}</span> <span class="evverb">${esc(a.verb)}${a.who?' · '+esc(a.who):''}</span>${a.note?`<div class="quote" style="margin:4px 0 0">${esc(a.note)}${a.conf!=null?`<span class="conf" title="How sure the typed model was of this step. The quote above is the evidence; this is only confidence.">${a.conf.toFixed(2)}</span>`:''}</div>`:''}</span>
   <span class="sm">${esc(a.when)}</span>
   <span class="src">${a.is_url?`<a href="${esc(a.src)}" target="_blank" rel="noopener">open ↗</a>`:esc(a.src||'—')}</span></div>`;
 

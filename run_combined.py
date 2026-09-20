@@ -84,6 +84,9 @@ def main(argv=None) -> int:
     ap.add_argument("--mail-slug", help="a name for the mailbox")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic, offline baseline (no naming/abstraction/judge)")
+    ap.add_argument("--no-jev", action="store_true",
+                    help="turn off the typed (Jev) tier only — same Claude calls as "
+                         "before it existed. For measuring it.")
     ap.add_argument("--hybrid", action="store_true",
                     help="add an embedding shortlist to the semantic judge (needs VOYAGE_API_KEY)")
     ap.add_argument("--names", choices=["auto", "off"], default="auto",
@@ -107,7 +110,8 @@ def main(argv=None) -> int:
         # One decision drives the whole model tier: the judge, the namer and the
         # record reader. On by default; --no-llm (or no key) -> deterministic, and
         # the label says so. --hybrid adds the embedding shortlist.
-        tier = resolve("hybrid" if args.hybrid else "auto", no_llm=args.no_llm)
+        tier = resolve("hybrid" if args.hybrid else "auto", no_llm=args.no_llm,
+                       no_jev=args.no_jev)
         shaped, slug = _load_real(Path(args.github) if args.github else None, args.github_slug,
                                   Path(args.mail) if args.mail else None, args.mail_slug)
         provider = tier.semantic(log=prog)
@@ -139,7 +143,10 @@ def main(argv=None) -> int:
         mapper = classifier = None
     else:
         mapper, classifier = tier.mapper(log=prog), tier.classifier(log=prog)
-    activities = infer_activities(m, mapper, classifier, log=prog)
+    # The typed tier only ever narrows a generative call, so it rides with the
+    # real classifier and never with the demo's offline stand-in.
+    jev = tier.reading(log=prog) if (tier is not None and classifier is not None) else None
+    activities = infer_activities(m, mapper, classifier, log=prog, jev=jev)
 
     # Name the kinds (and item) with the model — offline stand-in for --demo, the
     # real Anthropic namer when the tier is on. `--names off` keeps raw verbs.

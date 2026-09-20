@@ -111,7 +111,8 @@ def _run_detected(args, tier: ModelTier, prog: Progress) -> int:
     # Abstraction runs BEFORE naming: reading the records can re-segment the
     # corpus (`abstraction._reproject`), and a namer that ran first would hand
     # back names keyed on kind ids that no longer mean the same thing.
-    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
+                                   jev=tier.reading(log=prog))
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
@@ -142,13 +143,16 @@ def main(argv=None) -> int:
                          "is set, else the deterministic baseline). 'llm' insists on it.")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic baseline (raw verbs, no AI naming/abstraction)")
+    ap.add_argument("--no-jev", action="store_true",
+                    help="turn off the typed (Jev) tier only — same Claude "
+                         "calls as before it existed. For measuring it.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
-    tier = resolve(args.names, no_llm=args.no_llm)
+    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev)
 
     if args.file:
         return _run_detected(args, tier, prog)
@@ -174,7 +178,8 @@ def main(argv=None) -> int:
     # Abstraction runs BEFORE naming: reading the records can re-segment the
     # corpus (`abstraction._reproject`), and a namer that ran first would hand
     # back names keyed on kind ids that no longer mean the same thing.
-    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
+                                   jev=tier.reading(log=prog))
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")

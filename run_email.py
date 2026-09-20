@@ -53,6 +53,9 @@ def main(argv=None) -> int:
                          "deterministic baseline). 'llm' insists on it.")
     ap.add_argument("--no-llm", action="store_true",
                     help="force the deterministic baseline (raw verbs, no AI naming/abstraction)")
+    ap.add_argument("--no-jev", action="store_true",
+                    help="turn off the typed (Jev) tier only — same Claude "
+                         "calls as before it existed. For measuring it.")
     ap.add_argument("--no-judge", action="store_true",
                     help="keep the reading tier but turn off the semantic same-work judge, so "
                          "correlation is fully deterministic (subject threads + silence split). "
@@ -64,7 +67,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
-    tier = resolve(args.names, no_llm=args.no_llm)
+    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev)
 
     p = Path(args.path)
     if not p.exists():
@@ -87,7 +90,8 @@ def main(argv=None) -> int:
     # back names keyed on kind ids that no longer mean the same thing.
     # Mail is the case the reading tier exists for: the verb is transport, so the
     # activity is read from each record (gated on records-per-activity).
-    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog)
+    activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
+                                   jev=tier.reading(log=prog))
     names = infer_names(m, enable=tier.names_enable(), log=prog)
 
     out = Path(args.out_dir)
