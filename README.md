@@ -173,6 +173,24 @@ a whole thread and reasons about it; Jev picks from a list. `--no-jev` exists so
 both paths stay one flag apart: run your corpus twice and compare
 `n_unclassified` before trusting either.
 
+### Calls that don't depend on each other now run at once
+
+Two loops used to queue: the record-reading batches (`ceil(records/25)` Opus
+calls) and the semantic judge (up to a couple of hundred Haiku calls). Neither
+reads the previous call's output, so on the Enron sample that was ~17 minutes of
+waiting for about a minute of work.
+
+Both now run concurrently, bounded at six in flight (`induction/concurrency.py`)
+— well inside a standard rate limit, and a 429 is retried by the same backoff
+everything else uses. Same calls, same tokens, same cost, same output.
+
+The judge's decisions stay strictly sequential, because they are order-dependent:
+a component already claimed by an earlier pair is out of the running, and which
+pair claims it first is decided by shortlist order. So the *judging* fans out and
+the *claiming* does not — `in_waves` evaluates a wave, then applies the rule to
+the results one at a time, exactly as the serial loop did.
+`tests/test_concurrency.py` pins that the joins are identical either way.
+
 Progress streams to stderr as it goes, so a multi-minute run is never a silent
 wait — including the line that matters most:
 

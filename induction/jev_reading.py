@@ -35,36 +35,13 @@ is asked and how much of it there is.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 
-# How many Jev calls are in flight at once. Questions inside ONE call are already
-# evaluated in parallel server-side; this is the second axis — many records at a
-# time — and it is what turns a serial walk over a corpus into one wide pass.
-_WORKERS = 8
-
-
-def _fan_out(fn, items: list, workers: int = _WORKERS) -> list:
-    """Map `fn` over `items` concurrently, in order, never raising.
-
-    A decision that fails is a decision the caller does without, so a worker that
-    raises yields None rather than taking the run down with it — the same bargain
-    every model seam in this codebase makes.
-    """
-    if not items:
-        return []
-
-    def safe(item):
-        try:
-            return fn(item)
-        except Exception:  # noqa: BLE001 — one record's decision, never the run
-            return None
-
-    if len(items) == 1:
-        return [safe(items[0])]
-    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
-        return list(pool.map(safe, items))
+# Questions inside ONE Jev call are already evaluated in parallel server-side;
+# `fan_out` is the second axis — many records at a time — and it is what turns a
+# serial walk over a corpus into one wide pass.
+from induction.concurrency import fan_out as _fan_out
 
 
 # ---------------------------------------------------------------------------

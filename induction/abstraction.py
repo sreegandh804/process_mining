@@ -757,14 +757,31 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
     if vocab.loose:
         log(f"abstraction:   (belonging to no process: {', '.join(vocab.loose)})")
 
-    got: dict[str, dict] = {}
-    for b, batch in enumerate(batches, 1):
+    # The batches run CONCURRENTLY. No batch reads another's output — each is a
+    # separate set of threads read against the same fixed vocabulary — so running
+    # them one after another was eleven minutes of waiting for a minute of work.
+    # Same calls, same tokens, same cost, same readings; they just stop queueing.
+    # Bounded in flight, because an unbounded burst earns 429s and `with_backoff`
+    # turns those straight back into a queue.
+    from induction.concurrency import fan_out
+
+    def read_batch(numbered) -> dict:
+        b, batch = numbered
         n_rec = sum(len(t["records"]) for t in batch)
         log(f"abstraction: classifying batch {b}/{n_batches} ({len(batch)} threads, {n_rec} records)")
         try:
-            got.update(_clean_thread_readings(classifier.classify_threads(batch, vocab), batch, vocab))
-        except Exception as e:
+            return _clean_thread_readings(
+                classifier.classify_threads(batch, vocab), batch, vocab)
+        except Exception as e:                # noqa: BLE001 — one batch, never the run
+            # Caught HERE rather than left to `fan_out`, which would swallow the
+            # exception's text along with the exception. A batch that failed is a
+            # batch a reader needs named, with what it failed on.
             log(f"[abstraction] batch {b} skipped ({type(e).__name__}: {e})")
+            return {}
+
+    got: dict[str, dict] = {}
+    for readings in fan_out(read_batch, list(enumerate(batches, 1))):
+        got.update(readings or {})
 
     for proc, step, n in _detach_lonely_steps(got, m, vocab):
         log(f"[abstraction] detached {step!r} from {proc}: seen in {n} records across "

@@ -503,13 +503,29 @@ def _semantic_pass(provider: SemanticProvider, policy: FuzzyPolicy, entities,
             shortlist = sorted(
                 shortlist, key=lambda p: -similar(texts[p[0]], texts[p[1]], stats).score)[:cap]
 
+    # Judged a wave at a time, not one pair at a time — a judgement is a network
+    # call and no pair's verdict depends on another's, so a serial walk over two
+    # hundred pairs is minutes of waiting for seconds of work.
+    #
+    # The DECISIONS stay strictly sequential, and they have to: a component that
+    # has already been claimed is out of the running, and which pair claims it
+    # first is decided by shortlist order. So the judging fans out and the
+    # claiming does not — results come back in the order they were asked, and the
+    # rule below is applied to them one at a time, exactly as before. A pair
+    # claimed while its wave was in flight is dropped here, unjudged-for, which
+    # costs at most a few calls per wave and never changes which joins are made.
+    from induction.concurrency import in_waves
+
     taken: set[str] = set()
     out: list[tuple[str, str, Confidence]] = []
-    for ra, rb in shortlist:
-        if ra in taken or rb in taken:
-            continue
-        reason = provider.judge.judge(with_context(ra), with_context(rb))
-        if not reason:
+
+    def unclaimed(pair) -> bool:
+        return pair[0] not in taken and pair[1] not in taken
+
+    for (ra, rb), reason in in_waves(
+            lambda pair: provider.judge.judge(with_context(pair[0]), with_context(pair[1])),
+            shortlist, unclaimed):
+        if not reason or not unclaimed((ra, rb)):
             continue
         taken.add(ra)
         taken.add(rb)
