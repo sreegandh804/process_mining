@@ -105,16 +105,19 @@ class AnthropicActivityMapper(ActivityMapper):
             self._log("[abstraction] activity mapping needs the Anthropic SDK: pip install anthropic")
             return {}
         try:
-            msg = with_backoff(
-                lambda: api.messages.create(
+            def once():
+                # Streamed for the same reason the reading pass is — see `_call`.
+                with api.messages.stream(
                     model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
                     max_tokens=_MAP_TOKENS,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
                                "Vocabulary:\n" + json.dumps(vocab, indent=2) +
                                "\n\nReturn the JSON map."}],
-                ),
-                label="activity map", log=self._log)
+                ) as stream:
+                    return stream.get_final_message()
+
+            msg = with_backoff(once, label="activity map", log=self._log)
             text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
             got = _parse_map(text)
             present = {_key(v["artefact"], v["action"]) for v in vocab}
@@ -1100,13 +1103,24 @@ class AnthropicRecordClassifier(RecordClassifier):
             return {}, ""
         from induction.anthropic_call import client, with_backoff
         api = client()
-        msg = with_backoff(
-            lambda: api.messages.create(
+
+        # STREAMED, not awaited in one blocking call. These ceilings are 8k and
+        # 16k, and a model that thinks before it answers can sit under one of
+        # them for minutes; a non-streaming request has to hold the connection
+        # open for the whole of that, and several of them at once is how a run
+        # starts reporting APITimeoutError instead of readings. Streaming keeps
+        # the connection fed while the model works. Nothing else changes — same
+        # prompt, same ceiling, same tokens, same reply; `get_final_message`
+        # hands back exactly what `create` would have returned.
+        def once():
+            with api.messages.stream(
                 model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
                 max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": content}],
-            ),
-            label="activity reading", log=self._log)
+            ) as stream:
+                return stream.get_final_message()
+
+        msg = with_backoff(once, label="activity reading", log=self._log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         if getattr(msg, "stop_reason", None) == "max_tokens":
             # A truncated reply is unparseable JSON, and unparseable JSON is an

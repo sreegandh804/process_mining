@@ -171,45 +171,163 @@ class SignalFilter:
 # "NEVER return a name that merely restates how a record travelled or was filed."
 # A word count cannot test that. An ordered rubric can, and a Score sits it on a
 # scale so the engine can require a margin rather than a coin flip.
-_LABEL_RUBRIC: list = [
-    {"what": "Restates how a record travelled or was filed",
-     "signals": ["Names the transport, not the outcome"],
-     "examples": ["Sent", "Forwarded", "Posted", "Correspondence Sharing", "Message logged"]},
-    {"what": "Generic office motion that would fit any process",
-     "signals": ["True of hiring, invoicing and incidents alike"],
-     "examples": ["Requested", "Reviewed", "Approved", "Updated"]},
-    {"what": "Names something achieved, in the concrete language of its own work",
-     "signals": ["A reader learns what the stage accomplished"],
-     "examples": ["Invoice issued", "Onsite interview", "Counsel engaged",
-                  "Termination validated"]},
-]
-
+# One axis, three scopes: DOES THE LABEL DISCRIMINATE, and at what level?
+#
+# These are not three ways a label can be bad. Each one is a precondition for a
+# specific computation the engine performs afterwards, and naming the computation
+# is what keeps the test honest rather than a matter of taste:
+#
+#   corpus scope    -> the spine. A label true of every record in the source gives
+#                      every record the same name, and there is no order to find.
+#   process scope   -> `_process_of_case`, which places a run by COUNTING its
+#                      records' labels. A label every process shares votes for
+#                      nothing, and no run can be placed.
+#   run scope       -> `variants` and `gaps_generic`, which compare a run against
+#                      its kind's common path. A label fitting one run makes every
+#                      run its own variant, and no gap is findable.
+#
+# Stated this way the tests carry no domain and no source. "Transport" was never
+# the criterion — it was a symptom of the corpus-scope one. `Sent` is useless
+# because it is true of every record whatever was done; on a support desk where
+# every record is a reply, `Replied` is useless for exactly the same reason, and
+# on a desk that also escalates, refunds and closes, `Replied to customer`
+# discriminates and is a real stage. The same three questions hold for an issue
+# tracker, a chat export or a ledger, and where a source's verbs already
+# discriminate, the reading tier never runs at all.
+#
+# Three Nouls rather than one rubric, because they are independent — each has a
+# label that passes the other two and fails only it — and because a Noul is
+# graded on a scale the model calibrates (a probability) instead of levels this
+# module invented and then had to guess a bar between. They ride in one call;
+# questions over one state are evaluated in parallel.
+#
+# Two of the three are provable. `_detach_lonely_steps` measures run scope by
+# co-occurrence, and `_process_of_case`'s vote counts expose process scope. So
+# these are cheap PREDICTIONS of properties the arithmetic later proves, run
+# early to stop a vocabulary the engine would have dismantled anyway — and their
+# error rate can be measured against that arithmetic rather than tuned by feel.
 _LABEL_QUESTIONS: dict = {
-    "is_a_stage": {
-        "type": "score",
+    "discriminates_in_corpus": {
+        "type": "noul",
         "instructions": {
-            "question": "Where does `label` sit on this rubric, as a stage of `process`?",
-            "focus": "Judge the label itself, not whether the process is real.",
+            "question": "Does `label` distinguish the records it names from the rest "
+                        "of this source?",
+            "focus": "Ask whether it could be true of every record here, whatever "
+                     "was done.",
         },
-        "criteria": _LABEL_RUBRIC,
+        "criteria": {
+            "true": {
+                "what": "Names something only some records in the source did",
+                "examples": ["Invoice issued", "Regression reproduced",
+                             "Refund authorised"],
+            },
+            "false": {
+                "what": "Could be said of any record in the source",
+                "not_for": "A label that happens to use the source's medium but "
+                           "still separates records — on a desk that also escalates "
+                           "and refunds, 'Replied to customer' separates",
+                "examples": ["Sent", "Forwarded", "Posted", "Message logged",
+                             "Commented"],
+            },
+        },
+    },
+    "discriminates_between_processes": {
+        "type": "noul",
+        "instructions": {
+            "question": "Does `label` belong to `process` in particular, rather than "
+                        "fitting every process in `vocabulary` equally?",
+            "focus": "A stage of one process should read oddly as a stage of another.",
+        },
+        "criteria": {
+            "true": {
+                "what": "Reads as a stage of this process and not of the others",
+                "examples": ["Onsite interview in hiring",
+                             "Letter of credit drafted in credit support"],
+            },
+            "false": {
+                "what": "A lifecycle position that fits every process listed",
+                "examples": ["Requested", "Reviewed", "Approved", "Updated",
+                             "Completed"],
+            },
+        },
+    },
+    "discriminates_across_runs": {
+        "type": "noul",
+        "instructions": {
+            "question": "Is `label` a stage that many runs of `process` pass through?",
+            "focus": "Not whether it is real work — whether two different runs could "
+                     "both be at it.",
+        },
+        "criteria": {
+            "true": {
+                "what": "A recurring stage; different runs reach it at different times",
+                "examples": ["Offer extended", "Imbalance worksheet built"],
+            },
+            "false": {
+                "what": "Fits one particular run, deal, person or counterparty, so no "
+                        "two runs can be compared through it",
+                "examples": ["Promotion to Managing Director",
+                             "Pre-petition exposure worksheets built from allocation "
+                             "and imbalance reports"],
+            },
+        },
     },
 }
 
-# The rubric has three levels, scored from zero, so the top level is 2.0. A label
-# must land nearer "achievement" than "generic motion" to survive — a Score may
-# come back between two levels, and a label the model puts halfway is one a reader
-# would argue about, which is reason enough not to build a vocabulary on it.
-_LABEL_BAR = 1.5
+# A label must clear every scope. The rule lives HERE, in code a reader can see
+# and tune per test, rather than inside a rubric's level ordering.
+#
+# The bar is low on purpose, and lower than the first version's, which was set
+# between invented levels and killed nine real stages on the Enron sample
+# ("Deal entered in Sitara", "Travel receipts submitted"). A Noul below this is
+# the model saying the property more likely does not hold than does; anything
+# above it is left to the arithmetic that can actually prove it.
+_LABEL_BAR = 0.35
+
+
+@dataclass(frozen=True)
+class Screened:
+    """One label's reading, one number per scope.
+
+    `failed` is the scope that sank it, and it is what the log quotes. The first
+    version said "it names how a record was filed" whatever the score was, which
+    on a label the model had judged merely generic was simply untrue.
+    """
+
+    in_corpus: Optional[float] = None
+    between_processes: Optional[float] = None
+    across_runs: Optional[float] = None
+
+    _WHY = {
+        "in_corpus": "it could be said of any record in this source, so it "
+                     "separates nothing and leaves no order to find",
+        "between_processes": "it fits every process here equally, so counting it "
+                             "cannot place a run in one",
+        "across_runs": "it fits one run rather than a stage many runs pass "
+                       "through, so no two runs can be compared through it",
+    }
+
+    def failed(self, bar: float) -> Optional[tuple[str, float, str]]:
+        """(scope, score, why) for the first scope the label fails, or None.
+
+        A scope with no answer cannot fail: the screen only ever removes a label
+        it actively judged, and silence is not a verdict.
+        """
+        for scope in ("in_corpus", "between_processes", "across_runs"):
+            value = getattr(self, scope)
+            if value is not None and value < bar:
+                return scope, value, self._WHY[scope]
+        return None
 
 
 class LabelScreen:
-    """Screens proposed step labels against the rubric the prompt already states.
+    """Screens proposed step labels on the one axis the engine's arithmetic needs.
 
     Runs AFTER the word-count rule, never instead of it: the length test is free,
-    deterministic and catches a different fault (a description that is a perfectly
-    good achievement, just thirteen words of one). This catches the short label
-    that names the envelope — which the length test waves through, and which then
-    fragments every variant it touches.
+    deterministic, and is a proxy for the run-scope question below — now backed by
+    it rather than standing in for it. This catches the SHORT label that fails a
+    scope, which the length test waves through and which then fragments every
+    variant it touches.
     """
 
     def __init__(self, jev=None, bar: float = _LABEL_BAR, log=None):
@@ -224,11 +342,27 @@ class LabelScreen:
     def available(self) -> bool:
         return self._jev.available
 
-    def screen(self, process: str, label: str) -> Optional[float]:
-        """The label's place on the rubric, or None if Jev had no opinion."""
-        answers = self._jev.ask({"process": process, "label": label}, _LABEL_QUESTIONS)
-        a = answers.get("is_a_stage")
-        return a.score if a is not None else None
+    def screen(self, process: str, label: str, vocabulary: Optional[list] = None
+               ) -> Screened:
+        """All three scopes, in ONE call — they are independent questions about one
+        state, so they are evaluated in parallel and cost a single round trip.
+
+        `vocabulary` is the other processes, because the process-scope question is
+        literally "does this belong to THIS one rather than those" and cannot be
+        asked without them.
+        """
+        state = {"process": process, "label": label}
+        if vocabulary:
+            state["vocabulary"] = list(vocabulary)
+        answers = self._jev.ask(state, _LABEL_QUESTIONS)
+
+        def p(name):
+            a = answers.get(name)
+            return a.noul if a is not None else None
+
+        return Screened(in_corpus=p("discriminates_in_corpus"),
+                        between_processes=p("discriminates_between_processes"),
+                        across_runs=p("discriminates_across_runs"))
 
     # What a step belonging to no process is called when it is screened. The
     # vocabulary allows loose steps on purpose — "a reading is never lost for want
@@ -236,30 +370,35 @@ class LabelScreen:
     _NO_PROCESS = "(no process)"
 
     def cull(self, steps_by_process: dict[str, list[str]], loose: Optional[list] = None
-             ) -> tuple[dict[str, list[str]], list[str], list[tuple[str, str, float]]]:
+             ) -> tuple[dict[str, list[str]], list[str], list[tuple]]:
         """Returns (kept, kept_loose, dropped); dropped entries are
-        (process, label, score).
+        (process, label, scope, score, why).
 
-        A label Jev could not score is KEPT. The screen can only ever remove a
-        label it actively judged — silence is not a verdict.
+        A label Jev could not read is KEPT, and a label is dropped only by a scope
+        that actually answered — the screen can only ever remove a label it
+        actively judged.
         """
         groups = dict(steps_by_process)
         if loose:
             groups[self._NO_PROCESS] = list(loose)
+        processes = [name for name in groups if name != self._NO_PROCESS]
         pairs = [(proc, label) for proc, labels in groups.items() for label in labels]
-        scores = _fan_out(lambda pl: self.screen(*pl), pairs)
-        verdicts = {pl: sc for pl, sc in zip(pairs, scores)}
+        read = _fan_out(lambda pl: self.screen(pl[0], pl[1], processes), pairs)
+        verdicts = {pl: r for pl, r in zip(pairs, read)}
+
         kept: dict[str, list[str]] = {}
         kept_loose: list[str] = []
-        dropped: list[tuple[str, str, float]] = []
+        dropped: list[tuple] = []
         for proc, labels in groups.items():
             survivors = []
             for label in labels:
-                score = verdicts.get((proc, label))
-                if score is not None and score < self.bar:
-                    dropped.append((proc, label, score))
-                else:
+                screened = verdicts.get((proc, label))
+                failure = screened.failed(self.bar) if screened is not None else None
+                if failure is None:
                     survivors.append(label)
+                else:
+                    scope, score, why = failure
+                    dropped.append((proc, label, scope, score, why))
             if proc == self._NO_PROCESS:
                 kept_loose = survivors
             elif survivors:
@@ -303,18 +442,68 @@ class Assignment:
     def placed(self) -> bool:
         return self.step is not None
 
+    def by_process(self) -> dict[str, float]:
+        """The distribution summed over each process's own steps.
+
+        Engine arithmetic over labels the model supplied — the same move
+        `_process_of_case` makes, and the reason this is not the boundary
+        question the engine refuses to ask. Nothing here asks which process the
+        record is in; it adds up what the model said about process-qualified
+        options and reads the total.
+        """
+        totals: dict[str, float] = {}
+        for option, weight in self.distribution.items():
+            process, _ = _read_pair(option)
+            if process:
+                totals[process] = totals.get(process, 0.0) + weight
+        return totals
+
+    @property
+    def process_confidence(self) -> Optional[float]:
+        totals = self.by_process()
+        return max(totals.values()) if totals else None
+
     @property
     def ambiguous(self) -> bool:
-        """True when an answer came back but nothing in it stood out."""
-        return self.placed and (self.confidence or 0.0) < _AMBIGUOUS_BAR
+        """True only when the record is torn WITHIN one process.
+
+        The first version compared one flat number against one bar, across every
+        process's steps at once. On the Enron sample that is a single Choice over
+        28 options spanning 7 processes, and it held back 75 of 184 records —
+        most of them not torn at all, merely spread.
+
+        Spread across processes and torn within one are different findings and
+        deserve different handling. A record whose mass sits firmly in one
+        process, split between two of ITS steps, is exactly the record the
+        generative pass should read: it will settle the step and quote the span.
+        A record whose mass is spread across several processes has nothing for
+        that pass to settle, and is the honest ambiguous case.
+
+        With no distribution to add up — an API that returns a pick and no
+        probabilities — this falls back to the pick's own confidence, which is
+        the most that can be said from what came back.
+        """
+        if not self.placed:
+            return False
+        totals = self.by_process()
+        if not totals:
+            return (self.confidence or 0.0) < _AMBIGUOUS_BAR
+        return max(totals.values()) < _PROCESS_BAR
 
     def top(self, n: int = 3) -> list[tuple[str, float]]:
         return sorted(self.distribution.items(), key=lambda kv: -kv[1])[:n]
 
 
-# Below this, a pick is a tie rather than a placement: the record goes to the
-# ambiguous pile WITH its distribution, instead of into a batch the generative
-# pass is paid to read and will most likely decline anyway.
+# How much of a record's probability mass must land in ONE process before the
+# record is worth reading. Below it the record fits no family in particular, and
+# there is nothing for the generative pass to settle.
+#
+# Deliberately not a bar on the winning STEP: a step bar is a bar on how finely
+# the vocabulary was cut, so a corpus with six steps per process would be judged
+# more doubtful than one with three for no reason but its own detail.
+_PROCESS_BAR = 0.55
+
+# Used only when an answer carries a pick and no distribution to add up.
 _AMBIGUOUS_BAR = 0.55
 
 # How a (process, step) pair is spelled as one Choice option, and read back.
@@ -510,10 +699,12 @@ class JevReading:
         if not dropped:
             return vocab
         self.n_labels_dropped = len(dropped)
-        for process, label, score in dropped:
-            log(f"[abstraction] dropped step {label!r} from {process}: scored "
-                f"{score:.2f} on the stage rubric — it names how a record was "
-                f"filed, not what was achieved")
+        for process, label, scope, score, why in dropped:
+            # The line names the scope that failed and says what that costs. A
+            # single fixed sentence for every drop, as the first version had, was
+            # wrong about most of them.
+            log(f"[abstraction] dropped step {label!r} from {process}: "
+                f"{scope.replace('_', ' ')} {score:.2f} — {why}")
         return ReadVocabulary(steps_by_process=kept, loose=kept_loose)
 
     # -- 4. place -----------------------------------------------------------

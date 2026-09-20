@@ -140,7 +140,7 @@ of them is a question whose answer set already exists:
 | `semantic.py` | same piece of work? and if related, by what? | noul + choice |
 | `abstraction.py` gate | does this record perform any step? | noul |
 | `abstraction.py` sample | does this record carry the work? | noul |
-| `abstraction.py` labels | is this label an achievement, or the envelope? | score |
+| `abstraction.py` labels | does this label discriminate — in the corpus, between processes, across runs? | 3 × noul |
 | `abstraction.py` assign | which `Process > Step` does this record perform? | choice |
 | `honesty.py` | is this cluster a process, where no profile has a rule? | choice |
 
@@ -160,6 +160,17 @@ distribution, so a record several steps fit *equally* is now a different finding
 from a record nothing fits. Both used to arrive at the same place — dropped, and
 counted as declined. They are now two piles with two reasons, and the ambiguous
 one is shown with what it was torn between.
+
+**The label screen is one axis at three scopes.** A step label is only useful
+because of what the engine computes with it afterwards, so each scope is a
+precondition for one of those computations: a label true of every record in the
+source leaves the spine with one node; a label fitting every process gives
+`_process_of_case` nothing to count; a label fitting one run makes every run its
+own variant. No domain is named, which is why the same three questions hold for
+a mailbox, an issue tracker, a chat export or a ledger — and where a source's
+verbs already discriminate, the reading tier never runs at all. Two of the three
+are things the engine later *proves* arithmetically, so the screen's error rate
+can be measured rather than tuned.
 
 **The rule the tests pin.** The typed tier can only ever *narrow*. A missing key,
 an unreachable service, a tripped breaker or a silent answer must leave the

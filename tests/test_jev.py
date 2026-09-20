@@ -175,31 +175,85 @@ def test_the_gate_cannot_invent_a_join_the_judge_refused():
 # The label screen
 # ---------------------------------------------------------------------------
 
-def test_a_transport_label_is_dropped_though_it_is_short_enough_to_pass():
+def _scopes(in_corpus=0.9, between=0.9, across=0.9):
+    return {"discriminates_in_corpus": {"noul": in_corpus},
+            "discriminates_between_processes": {"noul": between},
+            "discriminates_across_runs": {"noul": across}}
+
+
+def test_a_label_true_of_every_record_fails_at_corpus_scope():
     """'Correspondence Sharing' is two words — the word-count rule waves it
-    through — and is exactly what the discovery prompt forbids."""
-    screen = LabelScreen(jev=Jev(transport=transport({"is_a_stage": {"score": 0.2}})))
+    through — and separates nothing, so the spine would be one node."""
+    screen = LabelScreen(jev=Jev(transport=transport(_scopes(in_corpus=0.05))))
     kept, loose, dropped = screen.cull({"Comms": ["Correspondence Sharing"]})
     assert kept == {} and loose == []
-    assert dropped[0][1] == "Correspondence Sharing"
+    process, label, scope, score, why = dropped[0]
+    assert label == "Correspondence Sharing"
+    assert scope == "in_corpus"
+    assert "separates nothing" in why
 
 
-def test_an_achievement_label_survives():
-    screen = LabelScreen(jev=Jev(transport=transport({"is_a_stage": {"score": 2.0}})))
+def test_a_label_fitting_every_process_fails_at_process_scope():
+    """'Approved' is real work and separates records — and votes for no process,
+    so `_process_of_case` cannot place a run with it."""
+    screen = LabelScreen(jev=Jev(transport=transport(_scopes(between=0.08))))
+    _, _, dropped = screen.cull({"Billing": ["Approved"]})
+    assert dropped[0][2] == "between_processes"
+
+
+def test_a_label_fitting_one_run_fails_at_run_scope():
+    """Real work, specific to its process, and true of a single run — so every
+    run becomes its own variant and no gap is findable."""
+    screen = LabelScreen(jev=Jev(transport=transport(_scopes(across=0.10))))
+    _, _, dropped = screen.cull({"Staffing": ["Promotion to Managing Director"]})
+    assert dropped[0][2] == "across_runs"
+
+
+def test_the_three_scopes_are_independent():
+    """Each scope has a label that clears the other two and fails only it — which
+    is why they are three questions and not one rubric."""
+    for scope, kwargs in (("in_corpus", {"in_corpus": 0.05}),
+                          ("between_processes", {"between": 0.05}),
+                          ("across_runs", {"across": 0.05})):
+        screen = LabelScreen(jev=Jev(transport=transport(_scopes(**kwargs))))
+        _, _, dropped = screen.cull({"P": ["some label"]})
+        assert len(dropped) == 1 and dropped[0][2] == scope
+
+
+def test_a_label_clearing_every_scope_survives():
+    screen = LabelScreen(jev=Jev(transport=transport(_scopes())))
     kept, loose, dropped = screen.cull({"Billing": ["Invoice issued"]})
     assert kept == {"Billing": ["Invoice issued"]} and not dropped
 
 
-def test_a_label_jev_could_not_score_is_kept():
+def test_a_label_jev_could_not_read_is_kept():
     screen = LabelScreen(jev=Jev(transport=transport({})))
     kept, _, dropped = screen.cull({"Billing": ["Invoice issued"]})
     assert kept == {"Billing": ["Invoice issued"]} and not dropped
 
 
+def test_a_scope_that_did_not_answer_cannot_fail_a_label():
+    """Partial answers are normal. Only a scope that came back may drop a label."""
+    screen = LabelScreen(jev=Jev(transport=transport(
+        {"discriminates_in_corpus": {"noul": 0.9}})))
+    kept, _, dropped = screen.cull({"Billing": ["Invoice issued"]})
+    assert kept == {"Billing": ["Invoice issued"]} and not dropped
+
+
+def test_the_other_processes_travel_with_the_process_scope_question():
+    """"Does this belong to THIS process rather than those" cannot be asked
+    without naming those."""
+    seen = []
+    screen = LabelScreen(jev=Jev(transport=recording_transport(_scopes(), seen)))
+    screen.cull({"Billing": ["Invoice issued"], "Hiring": ["Offer made"]})
+    assert all(sorted(sent["state"]["vocabulary"]) == ["Billing", "Hiring"]
+               for sent in seen)
+
+
 def test_a_step_belonging_to_no_process_is_screened_too():
     """The vocabulary allows loose steps, so the screen has to see them — an
     earlier version culled only the nested ones and let every loose label pass."""
-    screen = LabelScreen(jev=Jev(transport=transport({"is_a_stage": {"score": 0.1}})))
+    screen = LabelScreen(jev=Jev(transport=transport(_scopes(in_corpus=0.02))))
     kept, loose, dropped = screen.cull({}, ["Correspondence Sharing"])
     assert kept == {} and loose == []
     assert [d[1] for d in dropped] == ["Correspondence Sharing"]
@@ -242,18 +296,48 @@ def test_a_peaked_distribution_is_a_placement():
     assert got.placed and not got.ambiguous
 
 
-def test_a_flat_distribution_is_ambiguous_rather_than_a_placement():
-    """The distinction the engine could not previously draw: a record several
-    steps fit equally is not the same finding as a record nothing fits."""
+def test_torn_between_steps_of_ONE_process_is_not_ambiguous():
+    """0.30/0.28/0.25 looks like a tie until you add it up: 0.83 of the mass is
+    in Hiring. That record belongs in front of the generative pass, which will
+    settle the step and quote the span — holding it back is what cost 75 of 184
+    records on the Enron sample."""
     jev = Jev(transport=transport({"step": {
         "choice": "Hiring > Onsite interview",
         "probabilities": {"Hiring > Onsite interview": 0.30, "Hiring > Offer made": 0.28,
                           "Hiring > CV screened": 0.25}}}))
     got = RecordAssigner(jev=jev).step_of({}, FakeVocab({"Hiring": [
         "Onsite interview", "Offer made", "CV screened"]}))
-    assert got.ambiguous
+    assert got.placed and not got.ambiguous
+    assert got.process_confidence == pytest.approx(0.83)
     assert [name for name, _ in got.top(2)] == ["Hiring > Onsite interview",
                                                 "Hiring > Offer made"]
+
+
+def test_mass_spread_across_processes_is_ambiguous():
+    """The genuine case: the record fits no family in particular, so there is
+    nothing for the generative pass to settle."""
+    jev = Jev(transport=transport({"step": {
+        "choice": "Hiring > Offer made",
+        "probabilities": {"Hiring > Offer made": 0.34, "Billing > Invoice issued": 0.33,
+                          "Credit > Letter drafted": 0.33}}}))
+    got = RecordAssigner(jev=jev).step_of({}, FakeVocab(
+        {"Hiring": ["Offer made"], "Billing": ["Invoice issued"],
+         "Credit": ["Letter drafted"]}))
+    assert got.ambiguous
+    assert got.process_confidence == pytest.approx(0.34)
+
+
+def test_a_finer_vocabulary_is_not_treated_as_a_doubtful_one():
+    """Six steps in one process split the same mass six ways. Judging the winning
+    STEP would call that corpus more doubtful than a three-step one purely for
+    being more detailed; judging the process does not."""
+    probs = {f"Hiring > step {i}": 1 / 6 for i in range(6)}
+    jev = Jev(transport=transport({"step": {"choice": "Hiring > step 0",
+                                            "probabilities": probs}}))
+    got = RecordAssigner(jev=jev).step_of({}, FakeVocab(
+        {"Hiring": [f"step {i}" for i in range(6)]}))
+    assert not got.ambiguous
+    assert (got.confidence or 0) < 0.2, "no single step stands out — and that is fine"
 
 
 def test_no_answer_is_no_placement():
@@ -363,7 +447,7 @@ def _corpus():
     return msgs
 
 
-def _dispatching(step_confidence=0.9, performs=0.9, stage_score=2.0):
+def _dispatching(step_confidence=0.9, performs=0.9, label_scope=0.9):
     """A scripted endpoint that answers whichever battery it was handed."""
     def send(url, payload, api_key, timeout):
         asked = set(payload["questions"])
@@ -371,8 +455,8 @@ def _dispatching(step_confidence=0.9, performs=0.9, stage_score=2.0):
             return {"answers": {"performs_action": {"noul": performs},
                                 "machine_generated": {"noul": 0.05},
                                 "carries_work": {"noul": 0.8}}}
-        if "is_a_stage" in asked:
-            return {"answers": {"is_a_stage": {"score": stage_score}}}
+        if "discriminates_in_corpus" in asked:
+            return {"answers": _scopes(label_scope, label_scope, label_scope)}
         if "step" in asked:
             options = list(payload["questions"]["step"]["criteria"])
             rest = (1.0 - step_confidence) / max(1, len(options) - 1)
@@ -454,10 +538,10 @@ def test_the_counts_reach_the_inspector():
     assert any(label.startswith("Gated") for label in labels)
 
 
-def test_a_transport_label_is_culled_from_the_discovered_vocabulary():
+def test_a_label_failing_a_scope_is_culled_from_the_discovered_vocabulary():
     """The screen runs over what discovery proposed, and a label it drops must
     not survive into the vocabulary the records are read against."""
-    _, got = _run_with(_dispatching(stage_score=0.1))
+    _, got = _run_with(_dispatching(label_scope=0.02))
     assert got.steps_by_process == {} and got.by_record == {}
 
 

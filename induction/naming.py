@@ -72,16 +72,20 @@ def infer_names(model, enable: bool = False, api_model: str | None = None, namer
     try:
         log(f"naming: labelling {len(payload.get('kinds', []))} kinds and "
             f"{len(payload.get('activities', []))} activities with the model")
-        msg = with_backoff(
-            lambda: api.messages.create(
+        def once():
+            # Streamed, like the reading pass: an 8k ceiling with thinking under
+            # it can hold a blocking connection open long enough to time out.
+            with api.messages.stream(
                 model=api_model or os.environ.get("INDUCTION_NAMING_MODEL", "claude-opus-5"),
                 # Room for the answer PLUS the model's thinking, which counts
                 # against this ceiling — see abstraction.py's note on the caps.
                 max_tokens=8000,
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": _prompt(payload)}],
-            ),
-            label="naming", log=log)
+            ) as stream:
+                return stream.get_final_message()
+
+        msg = with_backoff(once, label="naming", log=log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
         return _disambiguate(_clean(_parse(text)), model)
     except Exception as e:  # naming is a convenience; never break the run
