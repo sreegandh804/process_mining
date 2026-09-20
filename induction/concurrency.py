@@ -38,8 +38,13 @@ R = TypeVar("R")
 
 # Calls in flight at once. Chosen to sit comfortably inside a standard
 # per-minute rate limit rather than to saturate one — the fastest setting that
-# earns a 429 is slower than a slightly smaller one that does not.
-WORKERS = 6
+# earns a 429 is slower than a slightly smaller one that does not, because the
+# backoff turns a rate limit straight back into a queue with extra steps.
+#
+# Three still collapses eleven serial calls into four rounds rather than eleven,
+# which is most of the win; raise it only after watching a real run's log for
+# retry lines, and lower it if you see any.
+WORKERS = 3
 
 
 def fan_out(fn: Callable[[T], R], items: Sequence[T],

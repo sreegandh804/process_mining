@@ -180,9 +180,11 @@ calls) and the semantic judge (up to a couple of hundred Haiku calls). Neither
 reads the previous call's output, so on the Enron sample that was ~17 minutes of
 waiting for about a minute of work.
 
-Both now run concurrently, bounded at six in flight (`induction/concurrency.py`)
-— well inside a standard rate limit, and a 429 is retried by the same backoff
-everything else uses. Same calls, same tokens, same cost, same output.
+Both now run concurrently, bounded at three in flight
+(`WORKERS` in `induction/concurrency.py`) — well inside a standard rate limit,
+and a 429 is retried by the same backoff everything else uses. Same calls, same
+tokens, same cost, same output. Raise `WORKERS` only after checking a real run's
+log for retry lines.
 
 The judge's decisions stay strictly sequential, because they are order-dependent:
 a component already claimed by an earlier pair is out of the running, and which
