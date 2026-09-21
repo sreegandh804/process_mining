@@ -56,6 +56,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-jev", action="store_true",
                     help="turn off the typed (Jev) tier only — same Claude "
                          "calls as before it existed. For measuring it.")
+    ap.add_argument("--assign", choices=("flat", "beam"), default="flat",
+                    help="how the typed tier places a record: one choice over "
+                         "every process/step pair (flat), or a beam walk down "
+                         "the hierarchy (beam). For measuring the two.")
     ap.add_argument("--no-judge", action="store_true",
                     help="keep the reading tier but turn off the semantic same-work judge, so "
                          "correlation is fully deterministic (subject threads + silence split). "
@@ -67,7 +71,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
-    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev)
+    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev,
+                    assign=args.assign)
 
     p = Path(args.path)
     if not p.exists():

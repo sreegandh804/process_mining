@@ -88,7 +88,11 @@ def test_the_judge_is_not_asked_about_two_threads_with_nobody_in_common():
                policy=CorrelationPolicy(semantic=SemanticProvider(judge=spy)))
     assert spy.asked, "a pair with a shared person must still reach the judge"
     a, b = spy.asked[0]
-    assert "Who:" in a and "When:" in a, "the judge must be shown who and when"
+    # The judge is shown who and when as FIELDS, not as a header glued on top of
+    # the text — so a typed question can point at `a.when` rather than hope to
+    # find it in a preamble.
+    assert a["who"] and a["when"], "the judge must be shown who and when"
+    assert "Dominion" in a["text"]
 
 
 # --- 3. the leftover kind ------------------------------------------------------

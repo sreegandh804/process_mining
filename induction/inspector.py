@@ -309,6 +309,17 @@ def _decision_index(m) -> dict:
     out: dict = {}
     for row in ledger:
         out.setdefault(row.kind, {})[row.about] = row.to_dict()
+
+    # A join's key is the two component ids it was about, and the page renders
+    # RUNS, which are what those components became. So each join is also filed
+    # under each of its two sides: a run holding either one can find it. Filed,
+    # not copied — the row is the same object, and the pair key stays the
+    # canonical name in `model.json`.
+    joins = out.get("join", {})
+    for about, row in list(joins.items()):
+        if "↔" in about:
+            for side in about.split("↔"):
+                joins.setdefault(side.strip(), row)
     return out
 
 
@@ -737,6 +748,11 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
         # nothing. Cross-source runs say which systems they crossed.
         "tier": tier, "chip_word": chip_word, "chip_class": chip_class,
         "why": (case.confidence.rationale or "") if tier in ("heuristic", "model") else "",
+        # The component ids this run was built from, so a model-tier join can find
+        # the decision that made it. Only carried for the tier that has one.
+        "join_ids": (sorted({events_by_id[eid].entity_id
+                             for eid in case.event_ids if eid in events_by_id})
+                     if tier == "model" else []),
         "sources": sources, "cross": len(sources) > 1,
         "activities": nodes, "inferred": inferred,
     }
@@ -974,7 +990,10 @@ const art = a => `<div class="ev ${a.inferred?'inf':''}">
 
 function detail(r){
   const frame = M.ai_steps?`<div class="framing"><b>How to read this:</b> each step is what the model read the message as, quoting the line it read; the artefacts beneath are the records, and each opens to its source. A dotted step kept the source's own verb — the model would not commit.</div>`:'';
-  const why = r.why?`<div class="why"><b>Why these are one ${esc(item)} (${esc(r.tier)}):</b> ${esc(r.why)}</div>`:'';
+  // A model-tier run can carry the typed decision that made it; the chip
+  // finds it under either of the two components the join was about.
+  const joinChip = (r.join_ids||[]).map(id=>decChip('join',id,null,'why')).find(c=>c) || '';
+  const why = r.why?`<div class="why"><b>Why these are one ${esc(item)} (${esc(r.tier)}):</b> ${esc(r.why)}${joinChip}</div>`:'';
   const steps = r.activities.map(n=>`<div class="step ${n.unread_step?'unread':''}">
       <div class="sn">${esc(n.name)}${n.unread_step?' <span class="tag">— not read into a step</span>':''}</div>
       <div class="sm">${esc(n.when)}${n.sources.length?' · '+n.sources.map(esc).join(' + '):''} · ${n.n} record${n.n===1?'':'s'}</div>

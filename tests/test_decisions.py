@@ -163,7 +163,10 @@ def test_derived_numbers_are_kept_apart_from_the_answer():
     reading._record_step("evt:1", placed)
     row = ledger.to_list()[0]
     assert set(row["distribution"]) == set(probs)
-    assert row["derived"] == {"Hiring": 0.9, "Billing": 0.1}
+    assert row["derived"]["Hiring"] == pytest.approx(0.9)
+    assert row["derived"]["Billing"] == pytest.approx(0.1)
+    # The margin is derived too — computed here, not answered.
+    assert row["derived"]["separation (top ÷ second)"] == pytest.approx(9.0)
 
 
 def test_no_ledger_means_no_recording_and_no_error():

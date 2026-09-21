@@ -172,6 +172,47 @@ verbs already discriminate, the reading tier never runs at all. Two of the three
 are things the engine later *proves* arithmetically, so the screen's error rate
 can be measured rather than tuned.
 
+**Ambiguity is a margin, not a level.** A record is held back when the leading
+process is less than 1.5× ahead of the next — not when its mass falls under a
+fixed bar. Seven process families split a record's mass seven ways before
+anything is decided, so an absolute bar reads a corpus with more families as more
+doubtful than one with fewer, and the record has said nothing different about
+itself. `top ÷ second` means the same thing at any scale.
+
+**The judge is shown fields, not a blob.** `when`, `who` and `text` arrive as
+separate values, so the engine's hardest false positive — one subject across two
+spans of time, different people on each — is a question about `a.when`/`b.when`
+rather than a hope about a header glued on top of some text. When that pattern
+shows (text says one piece of work, relation says shared subject, dates and
+people say otherwise) the join is **flagged, not vetoed**: a suspicion a reader
+can see is worth more than a join silently withheld.
+
+**`--assign flat|beam`** (default `flat`). The vocabulary is a hierarchy —
+processes, and under each its own steps — and `flat` flattens it into one Choice
+over every pair. `beam` walks it instead, 7 options then 3–6, keeping K=3 paths
+alive so a close call at the process level can be settled by the step level. Paths
+score by geometric mean, `product(p) ** (1/decisions)`, length-normalised so a
+two-step process and a six-step one compare fairly.
+
+Both paths ask only about a record, never a run, so `_process_of_case` still
+draws every boundary by counting. A beam result carries the same
+`Process > Step` distribution a flat one does, so everything downstream reads it
+identically — and the ledger records the **whole path**, not just the leaf,
+because the beam's characteristic failure is an early wrong turn every step below
+inherits.
+
+`flat` stays the default until the numbers say otherwise. Run both:
+
+```bash
+python3 run_email.py --path samples/enron --out-dir out/flat
+python3 run_email.py --path samples/enron --out-dir out/beam --assign beam
+```
+
+If beam's declined count is lower **and** the steps it assigns survive
+`_detach_lonely_steps`, flip the default. If declined is lower but the lonely-step
+detacher starts killing more steps, beam is confidently placing records in the
+wrong process and flat stays.
+
 **Every decision you can see, you can open.** A bare `0.92` beside a step is not
 traceability — 0.92 of what, against what else? Four kinds of typed decision are
 recorded with the question exactly as the model was asked it, every option it

@@ -43,16 +43,46 @@ from typing import Optional, Sequence
 # The judge seam
 # ---------------------------------------------------------------------------
 
+def as_text(record) -> str:
+    """One side of a pair as prose, for a judge that reads prose.
+
+    The correlator now hands the judge FIELDS — `when`, `who`, `text`, and the
+    component id — because a typed question can point at them. A generative judge
+    still wants a paragraph, and this is where the paragraph is made: once, here,
+    rather than in every judge that needs one. A plain string passes through
+    unchanged, so a stub or a test may still hand over text.
+    """
+    if not isinstance(record, dict):
+        return str(record or "")
+    head = []
+    if record.get("when"):
+        head.append(f"When: {record['when']}")
+    who = record.get("who")
+    if who:
+        head.append("Who: " + (", ".join(who) if isinstance(who, (list, tuple)) else str(who)))
+    body = record.get("text", "")
+    return ("\n".join(head) + "\n\n" if head else "") + body
+
+
+def record_id(record) -> Optional[str]:
+    """The component id, when the caller supplied one. Never asked about — it is
+    carried so a decision about the pair can be found again, and a judge that
+    decided anything on an identifier would be deciding on the wrong thing."""
+    return record.get("id") if isinstance(record, dict) else None
+
+
 class SemanticJudge:
     """Decides whether two records are the *same piece of work*.
 
     ``judge`` returns a one-line reason when they are, or None. That is the whole
-    contract — a subclass may reach a network, a stub may be a table. The
-    correlator supplies only the two records' text and turns a reason into a
-    ``model``-tier link.
+    contract — a subclass may reach a network, a stub may be a table.
+
+    Each side arrives as a dict of fields (`when`, `who`, `text`, `id`) or, for a
+    caller that has only prose, as a string. `as_text` collapses either into the
+    paragraph a generative judge reads; a typed judge reads the fields directly.
     """
 
-    def judge(self, a_text: str, b_text: str) -> Optional[str]:
+    def judge(self, a_text, b_text) -> Optional[str]:
         raise NotImplementedError
 
 
@@ -70,8 +100,8 @@ class ScriptedJudge(SemanticJudge):
         # each rule: (concept terms, the reason to record if both sides mention one)
         self._rules = [(tuple(t.lower() for t in terms), reason) for terms, reason in rules]
 
-    def judge(self, a_text: str, b_text: str) -> Optional[str]:
-        a, b = a_text.lower(), b_text.lower()
+    def judge(self, a_text, b_text) -> Optional[str]:
+        a, b = as_text(a_text).lower(), as_text(b_text).lower()
         for terms, reason in self._rules:
             if any(t in a for t in terms) and any(t in b for t in terms):
                 return reason
@@ -114,7 +144,8 @@ class AnthropicJudge(SemanticJudge):
         self._tripped = False   # the breaker: API stayed overloaded through retries
         self.skipped = 0        # pairs we could not judge (transient or otherwise)
 
-    def judge(self, a_text: str, b_text: str) -> Optional[str]:
+    def judge(self, a_text, b_text) -> Optional[str]:
+        a_text, b_text = as_text(a_text), as_text(b_text)
         if self._tripped or not os.environ.get("ANTHROPIC_API_KEY"):
             return None
         from induction.anthropic_call import client, is_transient, with_backoff
@@ -174,6 +205,7 @@ _PAIR_QUESTIONS: dict = {
         "type": "noul",
         "instructions": {
             "question": "Are `a` and `b` records of the SAME piece of work?",
+            "compare": ["`a.text`", "`b.text`"],
             "focus": "One task, incident or change — not merely one subject.",
         },
         "criteria": {
@@ -195,6 +227,7 @@ _PAIR_QUESTIONS: dict = {
         "type": "choice",
         "instructions": {
             "question": "If `a` and `b` are connected at all, what connects them?",
+            "compare": ["`a.text`", "`b.text`"],
             "focus": "Name the strongest connection, not every connection.",
         },
         "criteria": {
@@ -210,6 +243,36 @@ _PAIR_QUESTIONS: dict = {
             "unrelated": {"what": "No meaningful connection", "examples": []},
         },
     },
+    # The third question, and the reason the state is fields rather than a blob.
+    # "The same counterparty a fortnight apart, different people on it" is the
+    # engine's hardest false positive, and it is a question about `a.when`,
+    # `b.when` and the two `who` lists — not something to be hoped for from a
+    # header pasted on top of some text.
+    "one_span_of_work": {
+        "type": "noul",
+        "instructions": {
+            "question": "Are `a.when` and `b.when` consistent with ONE continuous "
+                        "piece of work, given who was on each?",
+            "compare": ["`a.when`", "`b.when`", "`a.who`", "`b.who`"],
+            "focus": "Judge the gap and the people, not the subject matter.",
+        },
+        "criteria": {
+            "true": {
+                "what": "The dates sit inside one run's rhythm, or the same people "
+                        "carry it across the gap",
+                "examples": ["A report and its fix days apart, same engineer",
+                             "A quote and the order placed against it that week"],
+            },
+            "false": {
+                "what": "A gap longer than one run of this kind takes, with different "
+                        "people on each side",
+                "not_for": "A genuinely long-running piece of work whose participants "
+                           "stay the same",
+                "examples": ["Two dealings with one counterparty a fortnight apart, "
+                             "no one in common"],
+            },
+        },
+    },
 }
 
 
@@ -220,14 +283,47 @@ class PairVerdict:
     same: float
     relation: Optional[str] = None
     relation_p: Optional[float] = None
+    one_span: Optional[float] = None
+
+    @property
+    def same_subject_apart(self) -> bool:
+        """The engine's hardest false positive, now detectable as a SHAPE.
+
+        Two threads about one counterparty, weeks apart, different people: the
+        text reads as one piece of work and it is two runs. Before, that was one
+        number to be argued with. Now it is a pattern across three answers — the
+        text says yes, the relation says the subject is shared, and the dates and
+        people say otherwise — and a pattern is something the engine can act on
+        rather than hope about.
+        """
+        return (self.relation == "same_subject"
+                and self.one_span is not None and self.one_span < 0.5)
 
     def note(self) -> str:
-        """The one fragment appended to a join's reason, so the number a join
-        rests on travels with it everywhere the reason is shown."""
+        """The one fragment appended to a join's reason, so the numbers a join
+        rests on travel with it everywhere the reason is shown."""
         tail = f" · {self.relation}" if self.relation else ""
         if self.relation and self.relation_p is not None:
             tail = f" · {self.relation} {self.relation_p:.2f}"
+        if self.one_span is not None:
+            tail += f" · one span {self.one_span:.2f}"
         return f"jev {self.same:.2f}{tail}"
+
+
+def _side(record) -> dict:
+    """One side of the pair, as the fields the questions point at.
+
+    `id` is deliberately NOT sent. It is carried alongside so the decision can be
+    found again, and a question that could see it might decide on it — which is
+    the one thing a judge of content must never do.
+    """
+    if not isinstance(record, dict):
+        return {"text": str(record or "")[:1500]}
+    side = {"text": str(record.get("text", ""))[:1500]}
+    for key in ("when", "who"):
+        if record.get(key):
+            side[key] = record[key]
+    return side
 
 
 class JevGate:
@@ -255,20 +351,21 @@ class JevGate:
     def available(self) -> bool:
         return self._jev.available
 
-    def verdict(self, a_text: str, b_text: str) -> Optional[PairVerdict]:
+    def verdict(self, a, b) -> Optional[PairVerdict]:
         """A typed reading of the pair, or None when Jev could not be reached —
         and None must mean "no opinion", never "no": a gate that cannot run has
         to let the pair through, or an unreachable service would silently delete
         every model-tier join in the run."""
-        answers = self._jev.ask(
-            {"a": a_text[:1500], "b": b_text[:1500]}, _PAIR_QUESTIONS)
+        answers = self._jev.ask({"a": _side(a), "b": _side(b)}, _PAIR_QUESTIONS)
         same = answers.get("same_work")
         if same is None or same.noul is None:
             return None
         rel = answers.get("relation")
+        span = answers.get("one_span_of_work")
         return PairVerdict(same=same.noul,
                            relation=rel.choice if rel else None,
-                           relation_p=rel.confidence if rel else None)
+                           relation_p=rel.confidence if rel else None,
+                           one_span=span.noul if span is not None else None)
 
 
 class GatedJudge(SemanticJudge):
@@ -295,26 +392,36 @@ class GatedJudge(SemanticJudge):
         self.gated = 0      # pairs the gate answered for, so the judge never saw them
         self.passed = 0     # pairs the gate let through to the judge
 
-    def judge(self, a_text: str, b_text: str) -> Optional[str]:
-        verdict = self._gate.verdict(a_text, b_text)
+    def judge(self, a, b) -> Optional[str]:
+        verdict = self._gate.verdict(a, b)
         if verdict is None:
-            return self._judge.judge(a_text, b_text)   # no opinion: unchanged behaviour
+            return self._judge.judge(a, b)            # no opinion: unchanged behaviour
         if verdict.same < self.bar:
             self.gated += 1
-            self._record(a_text, b_text, verdict,
+            self._record(a, b, verdict,
                          "not judged — below the gate, so no join was proposed")
             return None
         self.passed += 1
-        reason = self._judge.judge(a_text, b_text)
+        reason = self._judge.judge(a, b)
         if not reason:
-            self._record(a_text, b_text, verdict,
+            self._record(a, b, verdict,
                          "passed the gate, and the judge still declined — no join")
             return None
-        self._record(a_text, b_text, verdict,
+        if verdict.same_subject_apart:
+            # The text reads as one piece of work, the subject is shared, and the
+            # dates and people say two runs. The generative judge cannot see that
+            # shape — it is offered one paragraph and asked one question — so the
+            # note goes on the join rather than overruling it. Flagging beats
+            # vetoing here: the pattern is a suspicion, and a reader who can see
+            # the suspicion can settle it; a join silently withheld cannot be
+            # argued with at all.
+            reason = (f"{reason} — but read as one SUBJECT across two spans of "
+                      f"time with different people, which is often two runs")
+        self._record(a, b, verdict,
                      f"joined at tier `model`, with the judge's reason: {reason}")
         return f"{reason} [{verdict.note()}]"
 
-    def _record(self, a_text: str, b_text: str, verdict: "PairVerdict", outcome: str) -> None:
+    def _record(self, a, b, verdict: "PairVerdict", outcome: str) -> None:
         """Record what the gate was asked and what the engine did with the answer.
 
         Recorded for BOTH outcomes, including the pairs that were gated out. A
@@ -326,35 +433,50 @@ class GatedJudge(SemanticJudge):
             return
         from induction.decisions import JOIN, Decision
 
+        derived = {}
+        if verdict.one_span is not None:
+            derived["one span of work"] = verdict.one_span
+        if verdict.same_subject_apart:
+            derived["same subject, two spans"] = 1.0
         self._ledger.add(Decision(
             kind=JOIN,
-            about=_pair_id(a_text, b_text),
+            about=pair_key(a, b),
             question=_PAIR_QUESTIONS["same_work"]["instructions"]["question"],
             qtype="noul",
             answer=round(verdict.same, 4),
             confidence=max(verdict.same, 1.0 - verdict.same),
             distribution=({verdict.relation: verdict.relation_p}
                           if verdict.relation and verdict.relation_p is not None else {}),
+            derived=derived,
             outcome=outcome,
         ))
 
 
-def _pair_id(a_text: str, b_text: str) -> str:
-    """A short, stable name for the pair the gate was shown.
+def pair_key(a, b) -> str:
+    """A stable name for the pair a decision was about.
 
-    The judge is handed text, not ids — that is its whole contract — so the
-    ledger names the pair by the first line of each side, which is what a reader
-    would recognise anyway. It identifies the decision, it is not an evidence
-    locator; the join itself carries that.
+    Built from the two component ids when the caller carried them, sorted, so the
+    same pair keys the same way whichever order it was judged in — that is what
+    lets a page find the decision behind a join it is rendering. The ids never
+    reach the model; they ride alongside the fields it is shown.
+
+    Falls back to the first line of each side's text when there are no ids, which
+    identifies the decision well enough to read but is not something the page can
+    look up. A caller that wants the join traceable supplies ids.
     """
-    def head(text: str) -> str:
-        for line in (text or "").splitlines():
-            line = line.strip()
-            if line and not line.startswith(("When:", "Who:")):
-                return line[:60]
-        return (text or "")[:60]
+    ids = (record_id(a), record_id(b))
+    if all(ids):
+        return "↔".join(sorted(ids))
 
-    return f"{head(a_text)} ↔ {head(b_text)}"
+    def head(record) -> str:
+        text = record.get("text", "") if isinstance(record, dict) else str(record or "")
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                return line[:60]
+        return text[:60]
+
+    return f"{head(a)} ↔ {head(b)}"
 
 
 # ---------------------------------------------------------------------------

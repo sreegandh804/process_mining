@@ -97,12 +97,18 @@ class ModelTier:
             object.__setattr__(self, "_ledger", Ledger())
         return self._ledger
 
+    # How the typed tier places a record: "flat" (one Choice over every
+    # `Process > Step` pair) or "beam" (walk the hierarchy). Flat is the default
+    # until the numbers say otherwise — see `--assign`.
+    assign_mode: str = "flat"
+
     def reading(self, log=None):
         """The typed tier for the reading pass, or None when it is off."""
         if not (self.active and self.typed):
             return None
         from induction.jev_reading import JevReading
-        return JevReading(log=log, ledger=self.decisions())
+        return JevReading(log=log, ledger=self.decisions(),
+                          assign_mode=self.assign_mode)
 
     def mapper(self, log=None):
         """Tier-1 activity mapper (verbs -> activities), or None when off."""
@@ -138,7 +144,7 @@ class ModelTier:
 
 
 def resolve(mode: str = "auto", *, no_llm: bool = False, no_jev: bool = False,
-            stream=None) -> ModelTier:
+            assign: str = "flat", stream=None) -> ModelTier:
     """Decide whether the model tier runs for this invocation.
 
     `mode` is a runner flag value: "auto" (default, on-if-available),
@@ -174,9 +180,12 @@ def resolve(mode: str = "auto", *, no_llm: bool = False, no_jev: bool = False,
 
     if not problems:
         typed = _have_jev_key() and not no_jev
-        label = ("on (Claude" + (" + Jev" if typed else "") + ")"
+        jev_note = (" + Jev (beam)" if typed and assign == "beam"
+                    else " + Jev" if typed else "")
+        label = ("on (Claude" + jev_note + ")"
                  + (" + embedding shortlist" if hybrid else ""))
-        return ModelTier(active=True, label=label, hybrid=hybrid, typed=typed)
+        return ModelTier(active=True, label=label, hybrid=hybrid, typed=typed,
+                         assign_mode=assign)
 
     if insist:
         # The model was requested explicitly — do not quietly hand back a
