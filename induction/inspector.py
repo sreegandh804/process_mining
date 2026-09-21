@@ -22,7 +22,6 @@ from pathlib import Path
 
 from induction.abstraction import Abstraction
 from induction.steps.variants import shape
-from induction.emit import disclaimers_for
 from induction.pipeline import InducedModel
 
 # Friendly nouns for common anchor types (LLM naming overrides these when on).
@@ -186,8 +185,6 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
             "n_projects": n_projects,
             "n_unplaced": n_unplaced,
             "read_ran": read_ran,
-            "corpus": _corpus_line(m, items),
-            "scope": disclaimers_for(m),
             "ai_named": bool(names.get("_ai")),
             "ai_steps": bool(abstraction),
             # Every gate the typed tier applied, counted. A gate nobody can see
@@ -774,43 +771,6 @@ def _deviation(case, kind, canon, gaps, step_label):
     return "usual", "—", False
 
 
-def _corpus_sources(m) -> list[str]:
-    """The distinct systems the corpus was read from, in friendly words."""
-    return sorted({_SRC_WORD.get(e.source.split(":")[0], e.source.split(":")[0])
-                   for e in m.shaped.entities
-                   if e.type != "person" and getattr(e, "source", "")})
-
-
-def _join_words(ws: list[str]) -> str:
-    if len(ws) <= 1:
-        return ws[0] if ws else "your systems"
-    return ", ".join(ws[:-1]) + " and " + ws[-1]
-
-
-def _corpus_line(m, items) -> str:
-    mf = m.manifest or {}
-    srcs = _corpus_sources(m)
-    if mf.get("source_kind") == "email":
-        return (f"Read from <b>{mf.get('n_messages', '?')} emails</b> in {m.slug}. Nothing was "
-                f"entered by hand; the threads and who-did-what were worked out from the "
-                f"messages, and every line opens to the message it came from.")
-    if mf.get("head"):
-        return (f"Read from <b>{m.slug}</b> — {mf.get('n_commits', '?')} records of activity. "
-                f"Nothing was entered by hand; it was worked out from your own history, and "
-                f"every line opens to the record it came from.")
-    if mf.get("source_kind") == "combined" or len(srcs) > 1:
-        n = mf.get("n_records") or sum(1 for e in m.shaped.entities if e.type != "person")
-        return (f"Read across <b>{_join_words(srcs)}</b> — {n} records, nothing entered by "
-                f"hand. The runs, the steps and who did what were worked out from the "
-                f"artefacts themselves; different systems, one process. Every step opens to "
-                f"the record it came from.")
-    n = mf.get("n_rows", len(m.cases))
-    sheets = len(mf.get("sheets", []) or [])
-    where = f"{sheets} spreadsheet{'' if sheets == 1 else 's'}" if sheets else "your records"
-    return (f"Read from <b>{where}</b> — {n} {items}. Nothing was entered by hand; it was "
-            f"worked out from your own records, and every line opens to the row it came from.")
-
-
 def write_html(m: InducedModel, path: str | Path, names: dict | None = None,
                activities: dict | None = None) -> Path:
     path = Path(path)
@@ -840,7 +800,6 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   header.top{background:var(--paper);border-bottom:1px solid var(--rule)}
   header.top .wrap{padding-top:26px}
   h1{font:400 30px/1.2 var(--serif);letter-spacing:-.01em;margin:0 0 8px}
-  .lede{max-width:66ch;color:var(--ink-2);margin:0 0 16px}
   .ai{font-size:12px;color:var(--read);background:var(--read-bg);border-radius:4px;padding:1px 7px;margin-left:6px}
   /* Only ever rendered beside a quoted span, and never on a deterministic join:
      a number on a fact would make the fact look like an opinion. */
@@ -849,8 +808,13 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   /* ONE popover, reused by every chip on the page. Not an inline expander: an
      expander pushes everything below it down, and a page with dozens of them
      accumulates open panels nobody closed. This floats, and only one exists. */
-  #dec{position:absolute;z-index:40;max-width:440px;background:var(--bg);border:1px solid var(--rule);
-       border-radius:10px;box-shadow:0 6px 28px rgba(0,0,0,.14);padding:14px 16px;display:none;font-size:13px}
+  /* `--paper`, not `--bg` — there is no `--bg`, and an undefined custom property
+     resolves to nothing, which left the panel transparent and every line of the
+     page legible straight through it. Also capped and scrollable: a Choice over
+     28 options is taller than most screens. */
+  #dec{position:absolute;z-index:200;max-width:460px;max-height:60vh;overflow:auto;
+       background:var(--paper);border:1px solid var(--rule-2);
+       border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.18);padding:14px 16px;display:none;font-size:13px}
   #dec[data-open="1"]{display:block}
   #dec .q{font-weight:600;margin:0 0 2px}
   #dec .meta{color:var(--ink-3);font-size:11.5px;margin:0 0 9px}
@@ -929,14 +893,13 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .gl td:nth-child(2){width:70px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
   .gl .unc{color:var(--open)}
   .gl .phs{margin-top:4px}.gl .ph{display:inline-block;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);background:var(--canvas);border-radius:4px;padding:1px 6px;margin:2px 4px 0 0}
-  .scope{font-size:12.5px;color:var(--ink-3);margin:24px 0 0;padding-left:18px}
   @media (max-width:880px){.shell{grid-template-columns:1fr;gap:14px}nav.rail{position:static;display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
     .railcap{display:none}.rowbtn{width:auto;white-space:nowrap;border:1px solid var(--rule-2);background:var(--paper)}.card{padding:18px 16px}.stats .disclose{margin-left:0}}
 </style></head>
 <body>
 <header class="top"><div class="wrap">
   <h1 id="title"></h1>
-  <p class="lede" id="source"></p>
+
   <div class="stats" id="stats"></div>
 </div></header>
 <div class="wrap shell">
@@ -955,7 +918,6 @@ const leftover = V.processes.find(p=>p.leftover);
 const runsOf = id => V.runs.filter(r=>r.kind_id===id);
 
 document.getElementById('title').textContent = M.title;
-document.getElementById('source').innerHTML = M.corpus + (M.ai_named?' <span class="ai">names suggested by AI</span>':'');
 document.getElementById('stats').innerHTML =
   `<span><b>${M.n_records}</b> records</span><span><b>${M.n_runs}</b> ${esc(items)}</span>` +
   `<span><b>${M.n_processes}</b> process${M.n_processes===1?'':'es'}</span>` +
@@ -1044,7 +1006,6 @@ function renderNode(p){
       <div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>
       ${threadTable(rs,false)}
     </div>
-    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
   </div>`;
 }
 
@@ -1062,7 +1023,6 @@ function renderLeftover(){
     </div>
     ${orph}
     <div class="band"><div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>${threadTable(rs,true)}</div>
-    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
   </div>`;
 }
 
@@ -1072,7 +1032,7 @@ function renderGlossary(){
   return `<div class="card"><h2>Step glossary</h2>
     <p class="sub">Where each step's name came from. A step's name is a claim like any other — some are the source's own word, some were grouped and named by a model, some were read out of the record's text and show the words they were read from.</p>
     <div class="band"><table class="gl"><thead><tr><th>Step</th><th>Records</th><th>How it got that name</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>`;
+</div>`;
 }
 
 function render(){

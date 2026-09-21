@@ -45,9 +45,34 @@ TABULAR_DISCLAIMERS = [
 ]
 
 
+EMAIL_DISCLAIMERS = [
+    "The corpus is a mailbox. Work done in a tracker, a call or a document "
+    "system never touched these messages and is inferred from gaps — never "
+    "asserted.",
+    "A thread is not a run. Where the header chain is missing, threads are "
+    "joined on subject and timing, which reads as `heuristic` and can mis-join.",
+    "Steps are what a model read each message to DO, with the line it read them "
+    "from. A message it would not commit to keeps the mailbox's own verb.",
+    "Order is read from the Date header. A message with none is `order: unknown`, "
+    "not guessed; a blank sender stays unknown, never invented.",
+    "Cost/value figures are NOT produced. The slots are exposed and empty.",
+]
+
+
 def disclaimers_for(m) -> list:
-    if (m.manifest or {}).get("source_kind") == "spreadsheet":
+    """What this corpus cannot conclude — the set that matches the source.
+
+    A mailbox run used to be handed the git list, which opens "The corpus is git
+    history only" and goes on about PR reviews. Every line of it was false for
+    the run it was attached to, which is worse than having no disclaimer: a
+    reader who checks one and finds it nonsense has no reason to trust the rest
+    of the artefact either.
+    """
+    kind = (m.manifest or {}).get("source_kind")
+    if kind == "spreadsheet":
         return TABULAR_DISCLAIMERS
+    if kind == "email":
+        return EMAIL_DISCLAIMERS
     return DISCLAIMERS
 
 TIER_LEGEND = {

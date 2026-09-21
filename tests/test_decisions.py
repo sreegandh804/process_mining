@@ -207,3 +207,35 @@ def test_model_json_carries_an_empty_list_when_the_tier_never_ran():
 
     m = induce(email_mbox.load("samples/enron", slug="e", max_messages=20), slug="e")
     assert build_model(m)["typed_decisions"] == []
+
+
+# ---------------------------------------------------------------------------
+# The artefact's disclaimers have to be about the corpus it describes
+# ---------------------------------------------------------------------------
+
+def test_a_mailbox_is_not_told_its_corpus_is_git():
+    """It was. Every line of the git list is false for a mail run, which is worse
+    than no disclaimer: a reader who checks one and finds it nonsense has no
+    reason to trust the rest of the artefact."""
+    from induction.emit import disclaimers_for
+
+    class M:
+        manifest = {"source_kind": "email"}
+
+    lines = " ".join(disclaimers_for(M()))
+    assert "git history" not in lines and "PR review" not in lines
+    assert "mailbox" in lines
+
+
+def test_each_source_kind_gets_its_own_set():
+    from induction.emit import disclaimers_for
+
+    def kind(name):
+        return type("M", (), {"manifest": {"source_kind": name}})()
+
+    email, sheet, git = (disclaimers_for(kind(k))
+                         for k in ("email", "spreadsheet", "anything-else"))
+    assert email != sheet != git and email != git
+    for lines in (email, sheet, git):
+        assert any("Cost/value" in line or "No amounts" in line for line in lines), (
+            "every set keeps the line saying no figures are invented")
