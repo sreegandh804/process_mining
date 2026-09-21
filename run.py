@@ -49,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-jev", action="store_true",
                     help="turn off the typed (Jev) tier only — same Claude "
                          "calls as before it existed. For measuring it.")
+    ap.add_argument("--assign", choices=("flat", "beam"), default="flat",
+                    help="how the typed tier places a record: one choice over "
+                         "every process/step pair (flat), or a beam walk down "
+                         "the hierarchy (beam). For measuring the two.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
@@ -73,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
     # Resolve the model tier only once the run can actually proceed, so a missing
     # cache does not also print a downshift note. May exit(2) on an insisted --names llm.
     from induction.model_tier import resolve
-    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev)
+    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev,
+                    assign=args.assign)
 
     print(f"[run] inducing processes from {args.slug} (profile: {args.profile}) "
           f"· model tier: {tier.label} ...")
@@ -89,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     # gated on records-per-activity and simply won't fire on a git corpus.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
                                    jev=tier.reading(log=prog))
+    # The typed tier's decisions, gathered across correlation and the reading
+    # pass, attached before emit so they reach model.json.
+    m.decisions = tier.decisions() if tier is not None else None
+
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")

@@ -53,11 +53,19 @@ from induction.concurrency import fan_out as _fan_out
 # notice is machine noise and performs something; a one-line "approved" performs
 # a step and looks like nothing. One broad question averages all three into a
 # number that means none of them.
+# Each question names the FIELD it turns on, in backticks, rather than saying
+# "this record" and leaving the model to work out which part matters. The state
+# is already structured — `_record_state` builds it from what the adapters
+# parsed — so describing it in prose was asking a model to re-find fields this
+# code was holding. Three questions that all read "this record" are three
+# questions looking at the same undifferentiated blob; pointed at `record.body`,
+# `record.actor` and `record.subject` they are three different questions.
 _SIGNAL_QUESTIONS: dict = {
     "performs_action": {
         "type": "noul",
         "instructions": {
-            "question": "Does this record show work being DONE?",
+            "question": "Does `record.body` show work being DONE?",
+            "inspect": "`record.body`",
             "focus": "Something moved forward — not that a message was sent.",
         },
         "criteria": {
@@ -76,8 +84,9 @@ _SIGNAL_QUESTIONS: dict = {
     "machine_generated": {
         "type": "noul",
         "instructions": {
-            "question": "Was this record produced by an automated system rather than a person?",
-            "focus": "Judge the author, not the subject.",
+            "question": "Was `record` produced by an automated system rather than a person?",
+            "inspect": ["`record.actor`", "`record.action`"],
+            "focus": "Judge the author in `record.actor`, not the subject matter.",
         },
         "criteria": {
             "true": {"what": "Emitted by a bot, cron job, monitor or pipeline",
@@ -90,8 +99,9 @@ _SIGNAL_QUESTIONS: dict = {
     "carries_work": {
         "type": "noul",
         "instructions": {
-            "question": "Would this record help someone infer what process this corpus is a record of?",
-            "focus": "Is the work itself visible here, or only the envelope?",
+            "question": "Would `record` help someone infer what process this corpus is a record of?",
+            "inspect": ["`record.subject`", "`record.body`"],
+            "focus": "Is the work itself visible in those fields, or only the envelope?",
         },
         "criteria": {
             "true": {"what": "Names the subject matter of the work concretely",
@@ -147,7 +157,9 @@ class SignalFilter:
         return self._jev.available
 
     def read(self, state) -> Signal:
-        answers = self._jev.ask(state, _SIGNAL_QUESTIONS)
+        # Nested under `record` so the questions' backticked paths resolve. A flat
+        # state with questions naming `record.body` points at nothing.
+        answers = self._jev.ask({"record": state}, _SIGNAL_QUESTIONS)
         if not answers:
             return Signal()
 
@@ -437,6 +449,10 @@ class Assignment:
     step: Optional[str] = None
     confidence: Optional[float] = None
     distribution: dict[str, float] = field(default_factory=dict)
+    # The walk that produced it, when a beam was used: [(process, p), (step, p)].
+    # Kept because the beam's characteristic failure is an early turn, and a
+    # reader shown only the leaf cannot see where it went wrong.
+    path: list = field(default_factory=list)
 
     @property
     def placed(self) -> bool:
@@ -464,50 +480,110 @@ class Assignment:
         return max(totals.values()) if totals else None
 
     @property
+    def separation(self) -> Optional[float]:
+        """How far the winning process is ahead of the runner-up, as a ratio.
+
+        A ratio rather than a level, because a level is a claim about how much
+        mass a record ought to have and that quantity depends on things the
+        record knows nothing about. Seven processes split a record's mass seven
+        ways before anything is decided; three split it three ways. An absolute
+        bar therefore reads a corpus with more families as more doubtful than one
+        with fewer, and the same is true down a level for a process with six
+        steps against one with three.
+
+        `top / second` has no such dependence. 1.0 is a dead heat whatever the
+        option count; 3.0 is a clear winner whatever the option count. It is the
+        only figure here that means the same thing across two different corpora.
+
+        None when there is nothing to compare against — one process, or no
+        distribution at all — because a race with one runner has no margin, and
+        reporting a number for it would invite a comparison that isn't there.
+        """
+        totals = sorted(self.by_process().values(), reverse=True)
+        if len(totals) < 2 or totals[1] <= 0:
+            return None
+        return totals[0] / totals[1]
+
+    @property
     def ambiguous(self) -> bool:
-        """True only when the record is torn WITHIN one process.
+        """True only when the record is torn BETWEEN processes.
 
-        The first version compared one flat number against one bar, across every
-        process's steps at once. On the Enron sample that is a single Choice over
-        28 options spanning 7 processes, and it held back 75 of 184 records —
-        most of them not torn at all, merely spread.
+        Spread across processes and torn within one are different findings. A
+        record whose mass sits firmly in one process, split between two of ITS
+        steps, is exactly the record the generative pass should read: it will
+        settle the step and quote the span. A record whose mass is spread across
+        several processes has nothing for that pass to settle, and is the honest
+        ambiguous case.
 
-        Spread across processes and torn within one are different findings and
-        deserve different handling. A record whose mass sits firmly in one
-        process, split between two of ITS steps, is exactly the record the
-        generative pass should read: it will settle the step and quote the span.
-        A record whose mass is spread across several processes has nothing for
-        that pass to settle, and is the honest ambiguous case.
+        The margin is what decides it, not a level. An earlier version compared
+        the winning process's mass against a flat 0.55, which on the Enron sample
+        held back 75 of 184 records — most of them not torn at all, merely spread
+        thin across seven families. The same record with three families on offer
+        would have sailed through, having said nothing different.
 
-        With no distribution to add up — an API that returns a pick and no
-        probabilities — this falls back to the pick's own confidence, which is
-        the most that can be said from what came back.
+        Two fallbacks, both deliberately permissive, because this decision can
+        only ever hold a record BACK: a single process on offer has no rival and
+        is not ambiguous, and an answer carrying a pick but no distribution is
+        judged on the pick's own confidence, which is the most that can be said
+        from what came back.
         """
         if not self.placed:
             return False
         totals = self.by_process()
         if not totals:
             return (self.confidence or 0.0) < _AMBIGUOUS_BAR
-        return max(totals.values()) < _PROCESS_BAR
+        margin = self.separation
+        if margin is None:
+            return False          # one process, nothing to be torn between
+        return margin < _SEPARATION_BAR
 
     def top(self, n: int = 3) -> list[tuple[str, float]]:
         return sorted(self.distribution.items(), key=lambda kv: -kv[1])[:n]
 
 
-# How much of a record's probability mass must land in ONE process before the
-# record is worth reading. Below it the record fits no family in particular, and
-# there is nothing for the generative pass to settle.
-#
-# Deliberately not a bar on the winning STEP: a step bar is a bar on how finely
-# the vocabulary was cut, so a corpus with six steps per process would be judged
-# more doubtful than one with three for no reason but its own detail.
-_PROCESS_BAR = 0.55
+# Paths kept alive through the walk. Three is enough for the step level to undo
+# a close call at the process level, and small enough that the walk stays cheaper
+# than it saves: one process call plus three step calls, against one flat call
+# over every pair.
+_BEAM_WIDTH = 3
+
+# The two question keys the walk uses, named so the ledger and the tests can
+# refer to the same strings the wire does.
+_BEAM_PROCESS = "process"
+_BEAM_STEP = "step"
+
+
+def _geometric_mean(probabilities: list) -> float:
+    """`product(p) ** (1 / n)` — the length-normalised score of a path.
+
+    Normalised because otherwise every additional decision makes a path look
+    worse, and a two-step process would beat a six-step one on depth alone. The
+    engine compares paths of different lengths constantly, so the score has to
+    be independent of how finely a process happens to have been cut.
+    """
+    if not probabilities:
+        return 0.0
+    product = 1.0
+    for p in probabilities:
+        product *= max(p, 1e-9)
+    return product ** (1.0 / len(probabilities))
+
+
+# How far ahead the winning process must be before the record is worth reading.
+# 1.5 means "half again the runner-up" — 0.45 against 0.30 reads, 0.34 against
+# 0.33 does not. A ratio, so it means the same thing whether the corpus has three
+# process families or seven, and whether a process has three steps or six.
+_SEPARATION_BAR = 1.5
 
 # Used only when an answer carries a pick and no distribution to add up.
 _AMBIGUOUS_BAR = 0.55
 
 # How a (process, step) pair is spelled as one Choice option, and read back.
 _PAIR_SEP = " > "
+
+# Named once, because the ledger has to record the question exactly as the model
+# was asked it — a paraphrase in the artefact would be a different question.
+_STEP_QUESTION = "Which stage does `record` perform?"
 
 
 def _pair_options(vocab) -> dict[str, None]:
@@ -546,17 +622,31 @@ class RecordAssigner:
     that a record with no clear place says so with numbers instead of vanishing.
     """
 
-    def __init__(self, jev=None, bar: float = _AMBIGUOUS_BAR, log=None):
+    def __init__(self, jev=None, bar: float = _AMBIGUOUS_BAR, log=None,
+                 mode: str = "flat", beam_width: int = _BEAM_WIDTH):
         self._log = log or (lambda m: None)
         if jev is None:
             from induction.jev_call import Jev
             jev = Jev(log=self._log)
         self._jev = jev
         self.bar = bar
+        # "flat" asks one Choice over every `Process > Step` pair; "beam" walks
+        # the hierarchy the vocabulary already is. The flat path is untouched and
+        # remains the default: which one places records better is a question
+        # about a corpus, and a flag makes that an afternoon's comparison rather
+        # than two checkouts.
+        self.mode = mode
+        self.beam_width = beam_width
 
     @property
     def available(self) -> bool:
         return self._jev.available
+
+    def assign(self, record_state, vocab, context: Optional[list] = None) -> Assignment:
+        """Place one record, by whichever route this assigner was built for."""
+        if self.mode == "beam":
+            return self.beam_of(record_state, vocab, context)
+        return self.step_of(record_state, vocab, context)
 
     def step_of(self, record_state, vocab, context: Optional[list] = None) -> Assignment:
         """Which `Process > Step` does THIS record perform?"""
@@ -572,7 +662,7 @@ class RecordAssigner:
             "step": {
                 "type": "choice",
                 "instructions": {
-                    "question": "Which stage does `record` perform?",
+                    "question": _STEP_QUESTION,
                     "focus": "The stage the record ACCOMPLISHES, not one it merely "
                              "mentions. Use `thread_context` to read a short reply.",
                 },
@@ -585,6 +675,103 @@ class RecordAssigner:
         process, step = _read_pair(a.choice)
         return Assignment(process=process, step=step, confidence=a.confidence,
                           distribution=a.probabilities)
+
+    # -- the beam ------------------------------------------------------------
+    #
+    # The vocabulary IS a hierarchy — processes, and under each its own steps —
+    # and the flat path flattens it, offering every `Process > Step` pair at once.
+    # On the Enron sample that is one Choice over 28 options spanning 7 families.
+    # A hierarchy asked as a flat list asks the model to weigh an invoice stage
+    # against a hiring stage in the same breath.
+    #
+    # Walking it instead asks 7 options then 3-6. Greedy would be cheaper still
+    # and cannot recover: one wrong turn at the top and every step below it is
+    # wrong, with no evidence that could undo it. A beam keeps K paths alive and
+    # lets the step question settle what the process question left close — which
+    # is exactly the failure a flat call does not have and a greedy walk does.
+    #
+    # Scored by the geometric mean of the edges taken,
+    # `product(p) ** (1 / decisions)`, so a path through a 2-step process and one
+    # through a 6-step process compare fairly. A plain product would make every
+    # deep path look worse than every shallow one for no reason but its depth.
+    #
+    # No boundary question is asked here either. The process level is a question
+    # about THIS RECORD — which family does it evidence — exactly as the flat
+    # pair-choice was. The run's family is still the plurality of its records'
+    # answers, counted by `_process_of_case`.
+
+    def beam_of(self, record_state, vocab, context: Optional[list] = None) -> Assignment:
+        """Place a record by walking process → step, keeping `beam_width` paths."""
+        processes = list(vocab.processes)
+        if not processes:
+            return self.step_of(record_state, vocab, context)   # loose steps only
+        state = {"record": record_state}
+        if context:
+            state["thread_context"] = context[:12]
+
+        top = self._choose(state, _BEAM_PROCESS, "Which of these is this record a "
+                                                 "record of?",
+                           {name: None for name in processes[:255]})
+        if not top:
+            return Assignment()
+
+        # Only the leading `beam_width` processes are explored. The rest are not
+        # wrong so much as not worth a call: a family the record gave 2% to will
+        # not win on its steps.
+        kept = sorted(top.items(), key=lambda kv: -kv[1])[:self.beam_width]
+        paths = _fan_out(lambda pair: self._steps_under(state, vocab, pair[0]), kept)
+
+        scored: list[tuple[float, str, str, float]] = []
+        for (process, p_process), steps in zip(kept, paths):
+            if not steps:
+                continue
+            for step, p_step in steps.items():
+                # Two decisions taken, so the geometric mean is the square root.
+                scored.append((_geometric_mean([p_process, p_step]),
+                               process, step, p_process))
+        if not scored:
+            return Assignment()
+        scored.sort(key=lambda row: -row[0])
+        best = scored[0]
+
+        # The distribution is rebuilt over the paths actually walked, in the same
+        # `Process > Step` spelling the flat path uses, so everything downstream —
+        # `by_process`, `separation`, the ledger, the popover — reads a beam
+        # result exactly as it reads a flat one.
+        distribution = {f"{process}{_PAIR_SEP}{step}": score
+                        for score, process, step, _ in scored}
+        return Assignment(process=best[1], step=best[2], confidence=best[0],
+                          distribution=distribution,
+                          path=[(best[1], best[3]), (best[2], best[0])])
+
+    def _choose(self, state, key: str, question: str, options: dict) -> dict:
+        """One level of the walk: a Choice, returned as its full distribution.
+
+        The distribution, not the pick — a beam needs every edge's weight, and
+        the pick is only the heaviest of them.
+        """
+        if len(options) < 2:
+            return {name: 1.0 for name in options}
+        answers = self._jev.ask(state, {key: {
+            "type": "choice",
+            "instructions": {"question": question,
+                             "focus": "Judge `record`; use `thread_context` only to "
+                                      "read a short reply."},
+            "criteria": options,
+        }})
+        a = answers.get(key)
+        if a is None or a.choice is None:
+            return {}
+        return dict(a.probabilities) or {a.choice: a.confidence or 1.0}
+
+    def _steps_under(self, state, vocab, process: str) -> dict:
+        """The step level, for one candidate process."""
+        steps = list(vocab.steps_for(process))
+        if not steps:
+            return {}
+        return self._choose(state, _BEAM_STEP,
+                            f"Which stage of {process} does `record` perform?",
+                            {name: None for name in steps[:255]})
 
 
 # ---------------------------------------------------------------------------
@@ -609,15 +796,22 @@ class JevReading:
     property worth checking in review: none of these can subtract.
     """
 
-    def __init__(self, jev=None, log=None, signals=True, labels=True, assign=True):
+    def __init__(self, jev=None, log=None, signals=True, labels=True, assign=True,
+                 ledger=None, assign_mode: str = "flat"):
         self._log = log or (lambda m: None)
         if jev is None:
             from induction.jev_call import Jev
             jev = Jev(log=self._log)
         self.jev = jev
+        # Where recordable decisions go. The gate is deliberately NOT recorded
+        # per record: it asserts nothing about any record, only about what was
+        # worth reading, and one row per gated record would bury the decisions a
+        # reader can actually dispute. It stays a count.
+        self.ledger = ledger
         self.signals = SignalFilter(jev=jev, log=self._log) if signals else None
         self.labels = LabelScreen(jev=jev, log=self._log) if labels else None
-        self.assigner = RecordAssigner(jev=jev, log=self._log) if assign else None
+        self.assigner = (RecordAssigner(jev=jev, log=self._log, mode=assign_mode)
+                         if assign else None)
         self.n_gated = 0
         self.n_ambiguous = 0
         self.n_labels_dropped = 0
@@ -688,7 +882,7 @@ class JevReading:
         return strong
 
     # -- 3. labels ----------------------------------------------------------
-    def screen_labels(self, vocab, log):
+    def screen_labels(self, vocab, log, abstraction=None):
         """Drop proposed steps that name the envelope rather than an achievement."""
         if self.labels is None or not self.labels.available or not vocab:
             return vocab
@@ -699,6 +893,12 @@ class JevReading:
         if not dropped:
             return vocab
         self.n_labels_dropped = len(dropped)
+        self._record_labels(dropped)
+        if abstraction is not None:
+            abstraction.dropped_labels = [
+                {"process": process, "label": label, "scope": scope,
+                 "score": score, "why": why}
+                for process, label, scope, score, why in dropped]
         for process, label, scope, score, why in dropped:
             # The line names the scope that failed and says what that costs. A
             # single fixed sentence for every drop, as the first version had, was
@@ -706,6 +906,30 @@ class JevReading:
             log(f"[abstraction] dropped step {label!r} from {process}: "
                 f"{scope.replace('_', ' ')} {score:.2f} — {why}")
         return ReadVocabulary(steps_by_process=kept, loose=kept_loose)
+
+    def _record_labels(self, dropped: list) -> None:
+        """A dropped label is the hardest decision to notice, so it is recorded.
+
+        A step that survives is visible on the page; a step that was proposed and
+        removed leaves no trace at all, and its absence silently reshapes every
+        flow the reader is looking at. This is the decision most worth being able
+        to argue with.
+        """
+        if self.ledger is None:
+            return
+        from induction.decisions import LABEL, Decision
+
+        for process, label, scope, score, why in dropped:
+            self.ledger.add(Decision(
+                kind=LABEL,
+                about=f"{process} > {label}",
+                question=_LABEL_QUESTIONS[f"discriminates_{scope}"]
+                         ["instructions"]["question"],
+                qtype="noul",
+                answer=round(score, 4),
+                confidence=max(score, 1.0 - score),
+                outcome=f"dropped from the vocabulary — {why}",
+            ))
 
     # -- 4. place -----------------------------------------------------------
     def place(self, abstraction, threads: list, vocab, events, m, log) -> tuple[list, dict]:
@@ -749,7 +973,7 @@ class JevReading:
             jobs.append((thread, asked, states, context))
 
         flat = [(st, ctx) for _, _, states, ctx in jobs for st in states]
-        answered = _fan_out(lambda pair: self.assigner.step_of(pair[0], vocab, pair[1]), flat)
+        answered = _fan_out(lambda pair: self.assigner.assign(pair[0], vocab, pair[1]), flat)
         cursor = 0
         for thread, asked, states, _ in jobs:
             results = [a if a is not None else Assignment()
@@ -758,6 +982,7 @@ class JevReading:
             kept_records = []
             for r, placed in zip(asked, results):
                 placements[r["id"]] = placed
+                self._record_step(r["id"], placed)
                 if placed.placed and placed.ambiguous:
                     # Answered, and the answer was a tie. This is the only case
                     # that holds a record back.
@@ -782,6 +1007,52 @@ class JevReading:
                 f"confidently; {len(ambiguous)} fit several steps equally and are "
                 f"listed with their distribution rather than read")
         return kept_threads, placements
+
+    def _record_step(self, record_id: str, placed: "Assignment") -> None:
+        """What the record was offered, what it picked, and what happened next.
+
+        `derived` carries the per-process mass this code adds up afterwards,
+        separately from `distribution`, which is what the model actually said.
+        The two are different claims and a reader should be able to tell them
+        apart: one is an answer, the other is arithmetic over it.
+        """
+        if self.ledger is None or not placed.placed:
+            return
+        from induction.decisions import STEP, Decision
+
+        if placed.ambiguous:
+            margin = placed.separation
+            outcome = ("held back as ambiguous — the leading process was only "
+                       + (f"{margin:.2f}× " if margin is not None else "")
+                       + "ahead of the next, so the record fits no family in "
+                         "particular and there is nothing for the reading pass to "
+                         "settle; shown with its distribution rather than read")
+        else:
+            outcome = ("sent to the generative pass, which decides the step and "
+                       "quotes the text it read it from")
+        derived = placed.by_process()
+        if placed.path:
+            # The walk, not just where it ended. A beam's characteristic failure
+            # is a wrong turn at the process level that every step below then
+            # inherits, and a reader shown only the leaf cannot see it happen.
+            for i, (name, p) in enumerate(placed.path):
+                derived[f"path {i + 1}: {name}"] = p
+        if placed.separation is not None:
+            # The margin, beside the masses it was computed from — it is what the
+            # decision actually turned on, and a reader comparing two records
+            # needs the figure that means the same thing for both.
+            derived["separation (top ÷ second)"] = placed.separation
+        self.ledger.add(Decision(
+            kind=STEP,
+            about=record_id,
+            question=_STEP_QUESTION,
+            qtype="choice",
+            answer=f"{placed.process}{_PAIR_SEP}{placed.step}" if placed.process else placed.step,
+            confidence=placed.confidence,
+            distribution=dict(placed.distribution),
+            derived=derived,
+            outcome=outcome,
+        ))
 
     # -- 5. report ----------------------------------------------------------
     def report(self, abstraction, log) -> None:

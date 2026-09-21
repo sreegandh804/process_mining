@@ -87,6 +87,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-jev", action="store_true",
                     help="turn off the typed (Jev) tier only — same Claude calls as "
                          "before it existed. For measuring it.")
+    ap.add_argument("--assign", choices=("flat", "beam"), default="flat",
+                    help="how the typed tier places a record: one choice over every "
+                         "process/step pair (flat), or a beam walk down the hierarchy "
+                         "(beam). For measuring the two.")
     ap.add_argument("--hybrid", action="store_true",
                     help="add an embedding shortlist to the semantic judge (needs VOYAGE_API_KEY)")
     ap.add_argument("--names", choices=["auto", "off"], default="auto",
@@ -111,7 +115,8 @@ def main(argv=None) -> int:
         # record reader. On by default; --no-llm (or no key) -> deterministic, and
         # the label says so. --hybrid adds the embedding shortlist.
         tier = resolve("hybrid" if args.hybrid else "auto", no_llm=args.no_llm,
-                       no_jev=args.no_jev)
+                       no_jev=args.no_jev,
+                       assign=args.assign)
         shaped, slug = _load_real(Path(args.github) if args.github else None, args.github_slug,
                                   Path(args.mail) if args.mail else None, args.mail_slug)
         provider = tier.semantic(log=prog)
@@ -152,6 +157,10 @@ def main(argv=None) -> int:
     # real Anthropic namer when the tier is on. `--names off` keeps raw verbs.
     if args.demo:
         from tests.combined_fixture import demo_namer
+        # The typed tier's decisions, gathered across correlation and the reading
+        # pass, attached before emit so they reach model.json.
+        m.decisions = tier.decisions() if tier is not None else None
+
         names = infer_names(m, namer=demo_namer, log=prog)
     else:
         names = infer_names(m, enable=(tier.names_enable() and args.names != "off"), log=prog)

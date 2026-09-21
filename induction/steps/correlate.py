@@ -478,17 +478,30 @@ def _semantic_pass(provider: SemanticProvider, policy: FuzzyPolicy, entities,
     if not candidates:
         return []
 
-    def with_context(root: str) -> str:
-        """What the judge is shown: the text, headed by the facts that separate a
-        run from a subject — when it happened and who was on it."""
+    def with_context(root: str) -> dict:
+        """What the judge is shown, as FIELDS rather than a glued-together blob.
+
+        `when` and `who` are what separate a run from a subject, and they used to
+        be a two-line header pasted on top of the text — facts this code was
+        already holding, flattened into prose so that whatever read it had to
+        find them again. A typed question can point at `a.when` and `b.when`
+        directly, and "the same counterparty a fortnight apart" becomes a
+        question about two fields instead of a hint buried in a preamble.
+
+        `id` rides along because it is the one thing the judge's own contract
+        cannot supply: the judge is handed content, deliberately, so nothing it
+        decides can depend on an identifier. But a DECISION about a pair has to
+        be findable afterwards, and a decision keyed on the first line of some
+        text is not. It is carried, never asked about.
+        """
         whens, whos = when_who[root]
-        head = []
+        state: dict = {"id": root, "text": texts[root]}
         if whens:
             lo, hi = min(whens), max(whens)
-            head.append(f"When: {lo.date()}" + (f" to {hi.date()}" if hi != lo else ""))
+            state["when"] = lo.date().isoformat() + (f" to {hi.date()}" if hi != lo else "")
         if whos:
-            head.append("Who: " + ", ".join(sorted(w.split(":")[-1] for w in whos)[:6]))
-        return ("\n".join(head) + "\n\n" if head else "") + texts[root]
+            state["who"] = sorted(w.split(":")[-1] for w in whos)[:6]
+        return state
 
     # Shortlist so the judge runs on a handful. An embedder ranks best; with none,
     # judge them all when few, else token-rank down to the cap — a budget when there

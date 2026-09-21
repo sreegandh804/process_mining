@@ -45,9 +45,34 @@ TABULAR_DISCLAIMERS = [
 ]
 
 
+EMAIL_DISCLAIMERS = [
+    "The corpus is a mailbox. Work done in a tracker, a call or a document "
+    "system never touched these messages and is inferred from gaps — never "
+    "asserted.",
+    "A thread is not a run. Where the header chain is missing, threads are "
+    "joined on subject and timing, which reads as `heuristic` and can mis-join.",
+    "Steps are what a model read each message to DO, with the line it read them "
+    "from. A message it would not commit to keeps the mailbox's own verb.",
+    "Order is read from the Date header. A message with none is `order: unknown`, "
+    "not guessed; a blank sender stays unknown, never invented.",
+    "Cost/value figures are NOT produced. The slots are exposed and empty.",
+]
+
+
 def disclaimers_for(m) -> list:
-    if (m.manifest or {}).get("source_kind") == "spreadsheet":
+    """What this corpus cannot conclude — the set that matches the source.
+
+    A mailbox run used to be handed the git list, which opens "The corpus is git
+    history only" and goes on about PR reviews. Every line of it was false for
+    the run it was attached to, which is worse than having no disclaimer: a
+    reader who checks one and finds it nonsense has no reason to trust the rest
+    of the artefact either.
+    """
+    kind = (m.manifest or {}).get("source_kind")
+    if kind == "spreadsheet":
         return TABULAR_DISCLAIMERS
+    if kind == "email":
+        return EMAIL_DISCLAIMERS
     return DISCLAIMERS
 
 TIER_LEGEND = {
@@ -56,6 +81,18 @@ TIER_LEGEND = {
     "heuristic": "rule-based inference (reference similarity, actor+time proximity)",
     "model": "embedding / LLM inference (not built in the baseline)",
 }
+
+# What `typed_decisions` is, said in the artefact so it travels with the data.
+TYPED_DECISIONS_NOTE = (
+    "Decisions a typed model (Jev) was asked, where a reader can see the "
+    "consequence and might dispute it: which stage a record performs, why two "
+    "records are one case, why a proposed step is absent from the vocabulary, "
+    "and why a cluster is flagged as a look-alike. Each row carries the question "
+    "as asked, the options and their probabilities, and what the ENGINE did with "
+    "the answer — which is not always what the answer alone would suggest. "
+    "Calls that only narrowed what was looked at (the record gate, the discovery "
+    "sample) assert nothing about any record and are counted, not listed."
+)
 
 
 def build_model(m: InducedModel) -> dict:
@@ -75,6 +112,7 @@ def build_model(m: InducedModel) -> dict:
                              "data-derived rationales — structure is identical either way."
                              % m.profile_id),
             "tier_legend": TIER_LEGEND,
+            "typed_decisions_note": TYPED_DECISIONS_NOTE,
             "what_it_cannot_conclude": disclaimers_for(m),
             "stats": _stats(m),
         },
@@ -87,6 +125,13 @@ def build_model(m: InducedModel) -> dict:
         "same_activity_merges": [mg.to_dict() for mg in m.merges],
         "gaps": [g.to_dict() for g in m.gaps],
         "orphans": [o.to_dict() for o in m.orphans],
+        # Every typed decision whose consequence a reader can see, with the
+        # question it answered, what it could have picked, and what the engine
+        # did next. In the artefact rather than only in the page, because the
+        # page is a view of this file and a claim that existed only in HTML would
+        # be one no downstream tool could check. Empty list when the typed tier
+        # did not run — never absent, so a consumer need not special-case it.
+        "typed_decisions": m.decisions.to_list() if m.decisions is not None else [],
         "members": [
             {
                 "id": e.id,

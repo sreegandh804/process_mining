@@ -113,6 +113,10 @@ def _run_detected(args, tier: ModelTier, prog: Progress) -> int:
     # back names keyed on kind ids that no longer mean the same thing.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
                                    jev=tier.reading(log=prog))
+    # The typed tier's decisions, gathered across correlation and the reading
+    # pass, attached before emit so they reach model.json.
+    m.decisions = tier.decisions() if tier is not None else None
+
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")
@@ -146,13 +150,18 @@ def main(argv=None) -> int:
     ap.add_argument("--no-jev", action="store_true",
                     help="turn off the typed (Jev) tier only — same Claude "
                          "calls as before it existed. For measuring it.")
+    ap.add_argument("--assign", choices=("flat", "beam"), default="flat",
+                    help="how the typed tier places a record: one choice over "
+                         "every process/step pair (flat), or a beam walk down "
+                         "the hierarchy (beam). For measuring the two.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
-    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev)
+    tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev,
+                    assign=args.assign)
 
     if args.file:
         return _run_detected(args, tier, prog)

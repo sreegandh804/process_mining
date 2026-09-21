@@ -104,8 +104,9 @@ _TRIAGE_QUESTIONS: dict = {
     "produces_an_artefact": {
         "type": "noul",
         "instructions": {
-            "question": "Do the runs of this cluster produce or change something "
-                        "the organisation keeps?",
+            "question": "Do the runs of `cluster` produce or change something the "
+                        "organisation keeps?",
+            "inspect": ["`cluster.steps`", "`cluster.rationale`"],
             "focus": "An outcome that outlives the run — not a notification about one.",
         },
         "criteria": {
@@ -120,9 +121,12 @@ _TRIAGE_QUESTIONS: dict = {
     "verdict": {
         "type": "choice",
         "instructions": {
-            "question": "Is this cluster a real process, or something that merely "
-                        "looks like one?",
-            "focus": "Recurring shape is not enough; ask what the runs accomplish.",
+            "question": "Is `cluster` a real process, or something that merely looks "
+                        "like one?",
+            "inspect": ["`cluster.steps`", "`cluster.features.automated`",
+                        "`cluster.n_runs`"],
+            "focus": "Recurring shape is not enough — `cluster.n_runs` being large is "
+                     "not evidence. Ask what the runs in `cluster.steps` accomplish.",
         },
         "criteria": {
             "real_process": {"what": "Work the organisation means to do, that produces "
@@ -137,7 +141,7 @@ _TRIAGE_QUESTIONS: dict = {
 }
 
 
-def triage_unflagged(kinds: list[ProcessKind], jev=None, log=None) -> int:
+def triage_unflagged(kinds: list[ProcessKind], jev=None, log=None, ledger=None) -> int:
     """Ask the typed tier about the clusters the profile had no opinion on.
 
     Strictly additive, in three ways that matter:
@@ -184,6 +188,22 @@ def triage_unflagged(kinds: list[ProcessKind], jev=None, log=None) -> int:
             f"(confidence {verdict.confidence:.2f}). This is inference, not a rule — "
             f"flagged, not deleted, and the runs remain inspectable.")
         flagged += 1
+        if ledger is not None:
+            from induction.decisions import REJECT, Decision
+
+            ledger.add(Decision(
+                kind=REJECT,
+                about=kind.id,
+                question=_TRIAGE_QUESTIONS["verdict"]["instructions"]["question"],
+                qtype="choice",
+                answer=verdict.choice,
+                confidence=verdict.confidence,
+                distribution=dict(verdict.probabilities),
+                derived=({"produces_an_artefact": produces.noul}
+                         if produces is not None and produces.noul is not None else {}),
+                outcome=("flagged 'looks like a process, isn't' — the runs stay in the "
+                         "corpus and remain inspectable; nothing was deleted"),
+            ))
         log(f"[honesty] flagged {kind.name!r} as a look-alike non-process "
             f"(model, {verdict.confidence:.2f}) — no profile rule covered it")
     return flagged

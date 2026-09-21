@@ -22,7 +22,6 @@ from pathlib import Path
 
 from induction.abstraction import Abstraction
 from induction.steps.variants import shape
-from induction.emit import disclaimers_for
 from induction.pipeline import InducedModel
 
 # Friendly nouns for common anchor types (LLM naming overrides these when on).
@@ -186,8 +185,6 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
             "n_projects": n_projects,
             "n_unplaced": n_unplaced,
             "read_ran": read_ran,
-            "corpus": _corpus_line(m, items),
-            "scope": disclaimers_for(m),
             "ai_named": bool(names.get("_ai")),
             "ai_steps": bool(abstraction),
             # Every gate the typed tier applied, counted. A gate nobody can see
@@ -198,6 +195,11 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
         "processes": processes,
         "runs": runs,
         "filters": filters,
+        # Typed decisions, keyed by what they are about, so a chip on the page can
+        # open the question behind it. This is a LOOKUP of `model.json`'s
+        # `typed_decisions`, not a second copy with its own opinions — the same
+        # rows, indexed for the view.
+        "decisions": _decision_index(m),
         "vocabulary": vocabulary,
         "orphans": orphans,
     }
@@ -267,6 +269,15 @@ def _naming_provenance(m, abstraction) -> list[dict]:
                      "tier": "", "phrases": [], "unclassified": True, "n_read": 0,
                      "how": "a greeting, a bare forward or an acknowledgement — held back "
                             "from the reading rather than read and declined"})
+    for row in abstraction.dropped_labels:
+        # One row per dropped step, not a bucket: the point of showing these is
+        # that a reader can see WHICH name was taken out of the vocabulary they
+        # are reading, and open the question that took it out.
+        rows.append({"activity": f"✗ {row['label']}", "n": 0, "tier": "", "phrases": [],
+                     "unclassified": True, "n_read": 0, "dropped": True,
+                     "about": f"{row['process']} > {row['label']}",
+                     "how": f"proposed as a step of {row['process']} and dropped — "
+                            f"{row['why']}"})
     if abstraction.ambiguous:
         examples = []
         for row in abstraction.ambiguous[:4]:
@@ -279,6 +290,34 @@ def _naming_provenance(m, abstraction) -> list[dict]:
                      "how": "no step stood out — shown with what it was torn between, "
                             "rather than dropped"})
     return rows
+
+
+def _decision_index(m) -> dict:
+    """`{kind: {about: decision}}`, or `{}` when the typed tier never ran.
+
+    Keyed by `about` because that is what the page has in hand at render time: a
+    record id beside a step, a kind id beside a flag, a `process > label` beside
+    a dropped step. A decision with no visible consequence is not indexed here —
+    there would be nothing on the page for it to open from.
+    """
+    ledger = getattr(m, "decisions", None)
+    if ledger is None:
+        return {}
+    out: dict = {}
+    for row in ledger:
+        out.setdefault(row.kind, {})[row.about] = row.to_dict()
+
+    # A join's key is the two component ids it was about, and the page renders
+    # RUNS, which are what those components became. So each join is also filed
+    # under each of its two sides: a run holding either one can find it. Filed,
+    # not copied — the row is the same object, and the pair key stays the
+    # canonical name in `model.json`.
+    joins = out.get("join", {})
+    for about, row in list(joins.items()):
+        if "↔" in about:
+            for side in about.split("↔"):
+                joins.setdefault(side.strip(), row)
+    return out
 
 
 def _canon(kind) -> list[str]:
@@ -614,6 +653,9 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
             num = ent.attrs.get("number") if ent else None
             src = ev.evidence[0].locator if ev.evidence else ""
             arts.append({
+                # The record's own id, so a chip beside it can look up the typed
+                # decision that named its step.
+                "id": ev.id,
                 "activity": _activity(ev),
                 "artefact": _ITEM_WORDS.get(art_type, (art_type, art_type))[0],
                 "ref": f"#{num}" if num else "",
@@ -703,6 +745,11 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
         # nothing. Cross-source runs say which systems they crossed.
         "tier": tier, "chip_word": chip_word, "chip_class": chip_class,
         "why": (case.confidence.rationale or "") if tier in ("heuristic", "model") else "",
+        # The component ids this run was built from, so a model-tier join can find
+        # the decision that made it. Only carried for the tier that has one.
+        "join_ids": (sorted({events_by_id[eid].entity_id
+                             for eid in case.event_ids if eid in events_by_id})
+                     if tier == "model" else []),
         "sources": sources, "cross": len(sources) > 1,
         "activities": nodes, "inferred": inferred,
     }
@@ -722,43 +769,6 @@ def _deviation(case, kind, canon, gaps, step_label):
     if canon and canon[-1] not in set(present):
         return "ended", f"Ended at {step_label(present[-1])}", False
     return "usual", "—", False
-
-
-def _corpus_sources(m) -> list[str]:
-    """The distinct systems the corpus was read from, in friendly words."""
-    return sorted({_SRC_WORD.get(e.source.split(":")[0], e.source.split(":")[0])
-                   for e in m.shaped.entities
-                   if e.type != "person" and getattr(e, "source", "")})
-
-
-def _join_words(ws: list[str]) -> str:
-    if len(ws) <= 1:
-        return ws[0] if ws else "your systems"
-    return ", ".join(ws[:-1]) + " and " + ws[-1]
-
-
-def _corpus_line(m, items) -> str:
-    mf = m.manifest or {}
-    srcs = _corpus_sources(m)
-    if mf.get("source_kind") == "email":
-        return (f"Read from <b>{mf.get('n_messages', '?')} emails</b> in {m.slug}. Nothing was "
-                f"entered by hand; the threads and who-did-what were worked out from the "
-                f"messages, and every line opens to the message it came from.")
-    if mf.get("head"):
-        return (f"Read from <b>{m.slug}</b> — {mf.get('n_commits', '?')} records of activity. "
-                f"Nothing was entered by hand; it was worked out from your own history, and "
-                f"every line opens to the record it came from.")
-    if mf.get("source_kind") == "combined" or len(srcs) > 1:
-        n = mf.get("n_records") or sum(1 for e in m.shaped.entities if e.type != "person")
-        return (f"Read across <b>{_join_words(srcs)}</b> — {n} records, nothing entered by "
-                f"hand. The runs, the steps and who did what were worked out from the "
-                f"artefacts themselves; different systems, one process. Every step opens to "
-                f"the record it came from.")
-    n = mf.get("n_rows", len(m.cases))
-    sheets = len(mf.get("sheets", []) or [])
-    where = f"{sheets} spreadsheet{'' if sheets == 1 else 's'}" if sheets else "your records"
-    return (f"Read from <b>{where}</b> — {n} {items}. Nothing was entered by hand; it was "
-            f"worked out from your own records, and every line opens to the row it came from.")
 
 
 def write_html(m: InducedModel, path: str | Path, names: dict | None = None,
@@ -790,11 +800,30 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   header.top{background:var(--paper);border-bottom:1px solid var(--rule)}
   header.top .wrap{padding-top:26px}
   h1{font:400 30px/1.2 var(--serif);letter-spacing:-.01em;margin:0 0 8px}
-  .lede{max-width:66ch;color:var(--ink-2);margin:0 0 16px}
   .ai{font-size:12px;color:var(--read);background:var(--read-bg);border-radius:4px;padding:1px 7px;margin-left:6px}
   /* Only ever rendered beside a quoted span, and never on a deterministic join:
      a number on a fact would make the fact look like an opinion. */
-  .conf{font-size:11.5px;color:var(--ink-3);border:1px solid var(--rule);border-radius:4px;padding:0 5px;margin-left:8px;vertical-align:1px}
+  .conf{font:inherit;font-size:11.5px;color:var(--ink-3);background:none;border:1px solid var(--rule);border-radius:4px;padding:0 5px;margin-left:8px;vertical-align:1px;cursor:pointer}
+  .conf:hover,.conf:focus{border-color:var(--read);color:var(--read-ink)}
+  /* ONE popover, reused by every chip on the page. Not an inline expander: an
+     expander pushes everything below it down, and a page with dozens of them
+     accumulates open panels nobody closed. This floats, and only one exists. */
+  /* `--paper`, not `--bg` — there is no `--bg`, and an undefined custom property
+     resolves to nothing, which left the panel transparent and every line of the
+     page legible straight through it. Also capped and scrollable: a Choice over
+     28 options is taller than most screens. */
+  #dec{position:absolute;z-index:200;max-width:460px;max-height:60vh;overflow:auto;
+       background:var(--paper);border:1px solid var(--rule-2);
+       border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.18);padding:14px 16px;display:none;font-size:13px}
+  #dec[data-open="1"]{display:block}
+  #dec .q{font-weight:600;margin:0 0 2px}
+  #dec .meta{color:var(--ink-3);font-size:11.5px;margin:0 0 9px}
+  #dec .opt{display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-top:1px solid var(--rule)}
+  #dec .opt.win{font-weight:600}
+  #dec .opt span:last-child{font-variant-numeric:tabular-nums;color:var(--ink-3)}
+  #dec .did{margin:10px 0 0;padding-top:9px;border-top:1px solid var(--rule);color:var(--ink-2)}
+  #dec .did b{font-weight:600}
+  #dec .drv{margin:8px 0 0;color:var(--ink-3);font-size:11.5px}
   .stats{display:flex;flex-wrap:wrap;gap:0 18px;align-items:baseline;font-size:13.5px;color:var(--ink-2);border-top:1px solid var(--rule);padding:11px 0 13px}
   .stats b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
   .stats .disclose{margin-left:auto;color:var(--open);background:none;border:1px solid var(--open);border-radius:6px;padding:2px 9px;font:inherit;cursor:pointer}
@@ -864,14 +893,13 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .gl td:nth-child(2){width:70px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
   .gl .unc{color:var(--open)}
   .gl .phs{margin-top:4px}.gl .ph{display:inline-block;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);background:var(--canvas);border-radius:4px;padding:1px 6px;margin:2px 4px 0 0}
-  .scope{font-size:12.5px;color:var(--ink-3);margin:24px 0 0;padding-left:18px}
   @media (max-width:880px){.shell{grid-template-columns:1fr;gap:14px}nav.rail{position:static;display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
     .railcap{display:none}.rowbtn{width:auto;white-space:nowrap;border:1px solid var(--rule-2);background:var(--paper)}.card{padding:18px 16px}.stats .disclose{margin-left:0}}
 </style></head>
 <body>
 <header class="top"><div class="wrap">
   <h1 id="title"></h1>
-  <p class="lede" id="source"></p>
+
   <div class="stats" id="stats"></div>
 </div></header>
 <div class="wrap shell">
@@ -890,7 +918,6 @@ const leftover = V.processes.find(p=>p.leftover);
 const runsOf = id => V.runs.filter(r=>r.kind_id===id);
 
 document.getElementById('title').textContent = M.title;
-document.getElementById('source').innerHTML = M.corpus + (M.ai_named?' <span class="ai">names suggested by AI</span>':'');
 document.getElementById('stats').innerHTML =
   `<span><b>${M.n_records}</b> records</span><span><b>${M.n_runs}</b> ${esc(items)}</span>` +
   `<span><b>${M.n_processes}</b> process${M.n_processes===1?'':'es'}</span>` +
@@ -919,13 +946,16 @@ function renderRail(){
 
 // One artefact = one piece of evidence, opening to its source record.
 const art = a => `<div class="ev ${a.inferred?'inf':''}">
-  <span><span class="evref">${esc(a.artefact)}${a.ref?' '+esc(a.ref):''}</span> <span class="evverb">${esc(a.verb)}${a.who?' · '+esc(a.who):''}</span>${a.note?`<div class="quote" style="margin:4px 0 0">${esc(a.note)}${a.conf!=null?`<span class="conf" title="How sure the typed model was of this step. The quote above is the evidence; this is only confidence.">${a.conf.toFixed(2)}</span>`:''}</div>`:''}</span>
+  <span><span class="evref">${esc(a.artefact)}${a.ref?' '+esc(a.ref):''}</span> <span class="evverb">${esc(a.verb)}${a.who?' · '+esc(a.who):''}</span>${a.note?`<div class="quote" style="margin:4px 0 0">${esc(a.note)}${a.conf!=null?decChip('step',a.id,a.conf):''}</div>`:''}</span>
   <span class="sm">${esc(a.when)}</span>
   <span class="src">${a.is_url?`<a href="${esc(a.src)}" target="_blank" rel="noopener">open ↗</a>`:esc(a.src||'—')}</span></div>`;
 
 function detail(r){
   const frame = M.ai_steps?`<div class="framing"><b>How to read this:</b> each step is what the model read the message as, quoting the line it read; the artefacts beneath are the records, and each opens to its source. A dotted step kept the source's own verb — the model would not commit.</div>`:'';
-  const why = r.why?`<div class="why"><b>Why these are one ${esc(item)} (${esc(r.tier)}):</b> ${esc(r.why)}</div>`:'';
+  // A model-tier run can carry the typed decision that made it; the chip
+  // finds it under either of the two components the join was about.
+  const joinChip = (r.join_ids||[]).map(id=>decChip('join',id,null,'why')).find(c=>c) || '';
+  const why = r.why?`<div class="why"><b>Why these are one ${esc(item)} (${esc(r.tier)}):</b> ${esc(r.why)}${joinChip}</div>`:'';
   const steps = r.activities.map(n=>`<div class="step ${n.unread_step?'unread':''}">
       <div class="sn">${esc(n.name)}${n.unread_step?' <span class="tag">— not read into a step</span>':''}</div>
       <div class="sm">${esc(n.when)}${n.sources.length?' · '+n.sources.map(esc).join(' + '):''} · ${n.n} record${n.n===1?'':'s'}</div>
@@ -959,6 +989,7 @@ function renderNode(p){
     <p class="sub">${p.count} ${esc(items)} · ${p.n_records} records · ${p.n_records-p.n_unread} read into a step</p>
     ${p.actors.length?`<p class="who">${p.actors.map(esc).join('  ')}</p>`:''}
     ${p.why?`<div class="why"><b>Why these are one ${p.project?'project':'process'} (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
+    ${p.flagged?`<div class="why"><b>Looks like a process, isn't:</b> ${esc(p.flag_note)}${decChip('reject',p.id,null,'why')}</div>`:''}
     <div class="band">
       <div class="bandhead"><h3>The steps, in the order they usually happen</h3></div>
       ${p.flow.length?`<div class="flow">${flow(p.flow)}</div>
@@ -975,7 +1006,6 @@ function renderNode(p){
       <div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>
       ${threadTable(rs,false)}
     </div>
-    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
   </div>`;
 }
 
@@ -993,17 +1023,16 @@ function renderLeftover(){
     </div>
     ${orph}
     <div class="band"><div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>${threadTable(rs,true)}</div>
-    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul>
   </div>`;
 }
 
 function renderGlossary(){
   const rows = (V.vocabulary||[]).map(v=>`<tr class="${v.unclassified?'unc':''}"><td class="${v.unclassified?'unc':''}">${esc(v.activity)}</td><td>${v.n}</td>
-    <td>${esc(v.how)}${v.tier?` <span class="tag">${esc(v.tier)}</span>`:''}${v.phrases&&v.phrases.length?`<div class="phs">${v.phrases.map(q=>`<span class="ph">${esc(q)}</span>`).join('')}</div>`:''}</td></tr>`).join('');
+    <td>${esc(v.how)}${v.about?decChip('label',v.about,null,'why'):''}${v.tier?` <span class="tag">${esc(v.tier)}</span>`:''}${v.phrases&&v.phrases.length?`<div class="phs">${v.phrases.map(q=>`<span class="ph">${esc(q)}</span>`).join('')}</div>`:''}</td></tr>`).join('');
   return `<div class="card"><h2>Step glossary</h2>
     <p class="sub">Where each step's name came from. A step's name is a claim like any other — some are the source's own word, some were grouped and named by a model, some were read out of the record's text and show the words they were read from.</p>
     <div class="band"><table class="gl"><thead><tr><th>Step</th><th>Records</th><th>How it got that name</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <ul class="scope">${M.scope.map(s=>`<li>${esc(s)}</li>`).join('')}</ul></div>`;
+</div>`;
 }
 
 function render(){
@@ -1043,6 +1072,66 @@ function wire(){
       const det = tr.nextElementSibling; if(det && det.classList.contains('det') && !hit) det.hidden=true; }); };
 }
 window.addEventListener('hashchange',()=>{ const h=location.hash.slice(1); if(h && h!==current){ current=h; render(); } });
+
+// --- the typed-decision popover -------------------------------------------
+// A number with no question behind it is not traceability: 0.92 of what, against
+// what else? Every chip opens the same panel, which shows the question exactly as
+// the model was asked it, every option it could have picked, and — the part a
+// reader usually wants — what the ENGINE did once the answer came back, which is
+// not always what the answer alone suggests.
+const DEC = V.decisions || {};
+
+function decChip(kind, about, value, label){
+  if(!(DEC[kind]||{})[about]) return '';
+  const text = label!=null ? label : Number(value).toFixed(2);
+  return `<button class="conf" data-dec-kind="${esc(kind)}" data-dec-about="${esc(about)}"
+    aria-haspopup="dialog" title="What was asked, and what the engine did with the answer">${esc(text)}</button>`;
+}
+
+const decPanel = document.createElement('div');
+decPanel.id = 'dec';
+decPanel.setAttribute('role','dialog');
+document.body.appendChild(decPanel);
+
+function decClose(){ decPanel.removeAttribute('data-open'); }
+
+function decOpen(button){
+  const row = (DEC[button.dataset.decKind]||{})[button.dataset.decAbout];
+  if(!row) return;
+  const dist = row.distribution || {};
+  const picked = String(row.answer);
+  const options = Object.keys(dist).length
+    ? Object.entries(dist).map(([name,p])=>
+        `<div class="opt${name===picked?' win':''}"><span>${esc(name)}</span><span>${p.toFixed(2)}</span></div>`).join('')
+    : `<div class="opt win"><span>${esc(picked)}</span><span>${row.confidence!=null?row.confidence.toFixed(2):''}</span></div>`;
+  const derived = Object.entries(row.derived||{})
+    .map(([name,p])=>`${esc(name)} ${p.toFixed(2)}`).join(' · ');
+  const n = Object.keys(dist).length;
+  decPanel.innerHTML =
+    `<p class="q">${esc(row.question)}</p>`
+    + `<p class="meta">${esc(row.type)}${n?` · ${n} option${n===1?'':'s'}`:''} · about ${esc(row.about)}</p>`
+    + options
+    + (derived?`<p class="drv">summed by process (computed here, not answered): ${derived}</p>`:'')
+    + `<p class="did"><b>What the engine did:</b> ${esc(row.outcome)}</p>`;
+  decPanel.setAttribute('data-open','1');
+  const box = button.getBoundingClientRect();
+  const width = Math.min(440, window.innerWidth - 24);
+  decPanel.style.width = width + 'px';
+  decPanel.style.left = Math.max(12, Math.min(box.left + window.scrollX, window.scrollX + window.innerWidth - width - 12)) + 'px';
+  decPanel.style.top = (box.bottom + window.scrollY + 6) + 'px';
+}
+
+document.addEventListener('click', e=>{
+  const button = e.target.closest('button.conf');
+  if(button){ e.stopPropagation();
+    const same = decPanel.dataset.for === button.dataset.decAbout && decPanel.hasAttribute('data-open');
+    decPanel.dataset.for = button.dataset.decAbout;
+    if(same){ decClose(); } else { decOpen(button); }
+    return; }
+  if(!e.target.closest('#dec')) decClose();
+});
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') decClose(); });
+window.addEventListener('resize', decClose);
 render();
 </script>
 </body></html>"""

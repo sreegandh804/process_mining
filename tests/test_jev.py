@@ -641,3 +641,139 @@ def test_an_unreachable_host_is_transient_not_a_bad_request():
     with pytest.raises(JevError) as raised:
         _post("http://127.0.0.1:9/decisions", {"model": "x"}, "k", 1.0)
     assert is_transient(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# Separation: a margin, not a level
+# ---------------------------------------------------------------------------
+
+def _assignment(probs, vocab):
+    jev = Jev(transport=transport({"step": {
+        "choice": max(probs, key=probs.get), "probabilities": probs}}))
+    return RecordAssigner(jev=jev).step_of({}, vocab)
+
+
+def test_separation_is_the_winner_over_the_runner_up():
+    got = _assignment({"Hiring > Offer made": 0.45, "Billing > Invoice issued": 0.30,
+                       "Credit > Letter drafted": 0.25},
+                      FakeVocab({"Hiring": ["Offer made"], "Billing": ["Invoice issued"],
+                                 "Credit": ["Letter drafted"]}))
+    assert got.separation == pytest.approx(1.5)
+
+
+def test_one_process_on_offer_has_no_margin_and_is_never_ambiguous():
+    """A race with one runner has no margin. Reporting a number for it would
+    invite a comparison that is not there."""
+    got = _assignment({"Hiring > Offer made": 0.5, "Hiring > CV screened": 0.5},
+                      FakeVocab({"Hiring": ["Offer made", "CV screened"]}))
+    assert got.separation is None
+    assert not got.ambiguous
+
+
+def test_the_same_margin_reads_the_same_however_many_processes_there_are():
+    """The whole reason this is a ratio. An absolute bar on the winner's mass
+    calls a corpus with more families more doubtful than one with fewer, when
+    the record has said nothing different about itself."""
+    three = _assignment({"A > s": 0.60, "B > s": 0.20, "C > s": 0.20},
+                        FakeVocab({"A": ["s"], "B": ["s"], "C": ["s"]}))
+    seven = _assignment({"A > s": 0.30, "B > s": 0.10, "C > s": 0.10, "D > s": 0.10,
+                         "E > s": 0.10, "F > s": 0.15, "G > s": 0.15},
+                        FakeVocab({k: ["s"] for k in "ABCDEFG"}))
+    assert three.separation == pytest.approx(3.0)
+    assert seven.separation == pytest.approx(2.0)
+    # The seven-family record wins by less mass (0.30) but still clearly; under
+    # the old 0.55 level it was held back purely for having more rivals.
+    assert not three.ambiguous and not seven.ambiguous
+
+
+def test_a_dead_heat_between_processes_is_ambiguous_at_any_scale():
+    for probs, vocab in (
+            ({"A > s": 0.34, "B > s": 0.33, "C > s": 0.33},
+             FakeVocab({"A": ["s"], "B": ["s"], "C": ["s"]})),
+            ({"A > s": 0.52, "B > s": 0.48}, FakeVocab({"A": ["s"], "B": ["s"]}))):
+        got = _assignment(probs, vocab)
+        assert got.ambiguous, f"{probs} should read as a tie"
+
+
+def test_the_margin_travels_into_the_decision_record():
+    from induction.decisions import Ledger
+
+    ledger = Ledger()
+    reading = JevReading(jev=Jev(transport=transport({})), ledger=ledger)
+    reading._record_step("evt:1", _assignment(
+        {"A > s": 0.34, "B > s": 0.33, "C > s": 0.33},
+        FakeVocab({"A": ["s"], "B": ["s"], "C": ["s"]})))
+    row = ledger.to_list()[0]
+    assert "separation (top ÷ second)" in row["derived"]
+    assert "ahead of the next" in row["outcome"]
+
+
+# ---------------------------------------------------------------------------
+# The questions themselves have to be well formed
+# ---------------------------------------------------------------------------
+#
+# A scripted transport answers whatever it is handed and validates nothing, so
+# every test above passes against a malformed battery. One did: an edit left the
+# relation Choice with no options at all and moved them onto a Noul, which a real
+# endpoint would have rejected and the suite would not have noticed. These check
+# the shape the API documents, so a battery that could not be answered fails here
+# rather than on someone's first live run.
+
+ALL_BATTERIES = {}
+
+
+def _batteries():
+    if ALL_BATTERIES:
+        return ALL_BATTERIES
+    from induction.honesty import _TRIAGE_QUESTIONS
+    from induction.jev_reading import _LABEL_QUESTIONS, _SIGNAL_QUESTIONS
+    from induction.semantic import _PAIR_QUESTIONS
+    ALL_BATTERIES.update({"signal": _SIGNAL_QUESTIONS, "label": _LABEL_QUESTIONS,
+                          "pair": _PAIR_QUESTIONS, "triage": _TRIAGE_QUESTIONS})
+    return ALL_BATTERIES
+
+
+@pytest.mark.parametrize("battery", sorted(_batteries()))
+def test_every_question_declares_a_known_type(battery):
+    for name, question in _batteries()[battery].items():
+        assert question.get("type") in ("noul", "choice", "score"), f"{battery}.{name}"
+
+
+@pytest.mark.parametrize("battery", sorted(_batteries()))
+def test_a_choice_offers_at_least_two_options(battery):
+    """A Choice with one option is a foregone conclusion; with none it cannot be
+    answered at all."""
+    for name, question in _batteries()[battery].items():
+        if question["type"] == "choice":
+            assert len(question.get("criteria") or {}) >= 2, f"{battery}.{name}"
+
+
+@pytest.mark.parametrize("battery", sorted(_batteries()))
+def test_a_noul_describes_both_outcomes_or_neither(battery):
+    for name, question in _batteries()[battery].items():
+        if question["type"] == "noul" and question.get("criteria"):
+            assert set(question["criteria"]) == {"true", "false"}, f"{battery}.{name}"
+
+
+@pytest.mark.parametrize("battery", sorted(_batteries()))
+def test_a_score_rubric_is_an_ordered_list(battery):
+    for name, question in _batteries()[battery].items():
+        if question["type"] == "score":
+            assert isinstance(question.get("criteria"), list), f"{battery}.{name}"
+            assert len(question["criteria"]) >= 2, f"{battery}.{name}"
+
+
+@pytest.mark.parametrize("battery", sorted(_batteries()))
+def test_every_question_asks_something(battery):
+    for name, question in _batteries()[battery].items():
+        instructions = question.get("instructions")
+        text = instructions.get("question") if isinstance(instructions, dict) else instructions
+        assert text and str(text).strip(), f"{battery}.{name} asks nothing"
+
+
+@pytest.mark.parametrize("battery", sorted(_batteries()))
+def test_the_whole_battery_serialises(battery):
+    """It goes on the wire as JSON. A value that cannot be encoded fails at the
+    socket, which is the worst place to find out."""
+    import json
+    json.dumps(_batteries()[battery])
