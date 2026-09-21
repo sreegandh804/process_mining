@@ -92,6 +92,10 @@ def main(argv=None) -> int:
     # activity is read from each record (gated on records-per-activity).
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
                                    jev=tier.reading(log=prog))
+    # The typed tier's decisions, gathered across correlation and the reading
+    # pass, attached before emit so they reach model.json.
+    m.decisions = tier.decisions() if tier is not None else None
+
     names = infer_names(m, enable=tier.names_enable(), log=prog)
 
     out = Path(args.out_dir)

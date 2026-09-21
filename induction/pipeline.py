@@ -52,6 +52,11 @@ class InducedModel:
     merges: list = field(default_factory=list)         # ActivityMerge (same-activity-different-people)
     gaps: list[Gap] = field(default_factory=list)
     orphans: list[Orphan] = field(default_factory=list)
+    # The run's typed-decision ledger (`decisions.Ledger`), or None when the
+    # typed tier did not run. Attached by the runner after induction, because the
+    # decisions are made across two passes — correlation and the reading tier —
+    # and neither owns the model.
+    decisions: object = field(default=None, repr=False, compare=False)
 
     @property
     def cases(self) -> dict[str, Case]:

@@ -287,10 +287,11 @@ class GatedJudge(SemanticJudge):
     """
 
     def __init__(self, judge: SemanticJudge, gate: Optional[JevGate] = None,
-                 bar: float = 0.40, log=None):
+                 bar: float = 0.40, log=None, ledger=None):
         self._judge = judge
         self._gate = gate if gate is not None else JevGate(bar=bar, log=log)
         self.bar = bar
+        self._ledger = ledger
         self.gated = 0      # pairs the gate answered for, so the judge never saw them
         self.passed = 0     # pairs the gate let through to the judge
 
@@ -300,12 +301,60 @@ class GatedJudge(SemanticJudge):
             return self._judge.judge(a_text, b_text)   # no opinion: unchanged behaviour
         if verdict.same < self.bar:
             self.gated += 1
+            self._record(a_text, b_text, verdict,
+                         "not judged — below the gate, so no join was proposed")
             return None
         self.passed += 1
         reason = self._judge.judge(a_text, b_text)
         if not reason:
+            self._record(a_text, b_text, verdict,
+                         "passed the gate, and the judge still declined — no join")
             return None
+        self._record(a_text, b_text, verdict,
+                     f"joined at tier `model`, with the judge's reason: {reason}")
         return f"{reason} [{verdict.note()}]"
+
+    def _record(self, a_text: str, b_text: str, verdict: "PairVerdict", outcome: str) -> None:
+        """Record what the gate was asked and what the engine did with the answer.
+
+        Recorded for BOTH outcomes, including the pairs that were gated out. A
+        ledger that only held the joins would show a reader every connection the
+        engine made and none of the ones it decided against, which is the half
+        more likely to be wrong.
+        """
+        if self._ledger is None:
+            return
+        from induction.decisions import JOIN, Decision
+
+        self._ledger.add(Decision(
+            kind=JOIN,
+            about=_pair_id(a_text, b_text),
+            question=_PAIR_QUESTIONS["same_work"]["instructions"]["question"],
+            qtype="noul",
+            answer=round(verdict.same, 4),
+            confidence=max(verdict.same, 1.0 - verdict.same),
+            distribution=({verdict.relation: verdict.relation_p}
+                          if verdict.relation and verdict.relation_p is not None else {}),
+            outcome=outcome,
+        ))
+
+
+def _pair_id(a_text: str, b_text: str) -> str:
+    """A short, stable name for the pair the gate was shown.
+
+    The judge is handed text, not ids — that is its whole contract — so the
+    ledger names the pair by the first line of each side, which is what a reader
+    would recognise anyway. It identifies the decision, it is not an evidence
+    locator; the join itself carries that.
+    """
+    def head(text: str) -> str:
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line and not line.startswith(("When:", "Who:")):
+                return line[:60]
+        return (text or "")[:60]
+
+    return f"{head(a_text)} ↔ {head(b_text)}"
 
 
 # ---------------------------------------------------------------------------

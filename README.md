@@ -172,6 +172,42 @@ verbs already discriminate, the reading tier never runs at all. Two of the three
 are things the engine later *proves* arithmetically, so the screen's error rate
 can be measured rather than tuned.
 
+**Every decision you can see, you can open.** A bare `0.92` beside a step is not
+traceability — 0.92 of what, against what else? Four kinds of typed decision are
+recorded with the question exactly as the model was asked it, every option it
+could have picked, and what the *engine* then did (which is not always what the
+answer alone suggests):
+
+| decision | where it shows |
+| --- | --- |
+| which stage a record performs | chip beside the quoted span |
+| why two records are one case | on the join's reason |
+| why a proposed step is **absent** from the vocabulary | its own row in the audit table |
+| why a cluster is flagged a look-alike | on the flag |
+
+They land in **`model.json` under `typed_decisions`**, not only in the page: the
+inspector is a view of that file, and a claim that existed only in HTML would be
+one no downstream tool could check. The page reads them back — click any chip and
+one popover (never an inline expander, never a hover) shows the question, the
+distribution, and the outcome.
+
+Calls that only *narrowed* what was looked at — the record gate, the discovery
+sample — assert nothing about any record and are counted, not listed. One row per
+gated record would bury the four that matter.
+
+**Are the numbers stable enough to threshold on?** `check_jev.py` answers that,
+and nothing else should be trusted until it has:
+
+```bash
+python3 check_jev.py --path samples/enron --runs 10
+```
+
+It asks each question repeatedly about the same state and reports the spread and,
+more usefully, how often the *decision* flipped. A question with a low spread and
+a high flip count has its bar in the wrong place, not an unstable answer. It says
+nothing about whether an answer is right — for that, compare the screen against
+what `_detach_lonely_steps` and `_process_of_case` later prove.
+
 **The rule the tests pin.** The typed tier can only ever *narrow*. A missing key,
 an unreachable service, a tripped breaker or a silent answer must leave the
 engine doing precisely what it did before this existed — silence is never a "no".

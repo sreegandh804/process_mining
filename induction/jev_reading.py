@@ -53,11 +53,19 @@ from induction.concurrency import fan_out as _fan_out
 # notice is machine noise and performs something; a one-line "approved" performs
 # a step and looks like nothing. One broad question averages all three into a
 # number that means none of them.
+# Each question names the FIELD it turns on, in backticks, rather than saying
+# "this record" and leaving the model to work out which part matters. The state
+# is already structured — `_record_state` builds it from what the adapters
+# parsed — so describing it in prose was asking a model to re-find fields this
+# code was holding. Three questions that all read "this record" are three
+# questions looking at the same undifferentiated blob; pointed at `record.body`,
+# `record.actor` and `record.subject` they are three different questions.
 _SIGNAL_QUESTIONS: dict = {
     "performs_action": {
         "type": "noul",
         "instructions": {
-            "question": "Does this record show work being DONE?",
+            "question": "Does `record.body` show work being DONE?",
+            "inspect": "`record.body`",
             "focus": "Something moved forward — not that a message was sent.",
         },
         "criteria": {
@@ -76,8 +84,9 @@ _SIGNAL_QUESTIONS: dict = {
     "machine_generated": {
         "type": "noul",
         "instructions": {
-            "question": "Was this record produced by an automated system rather than a person?",
-            "focus": "Judge the author, not the subject.",
+            "question": "Was `record` produced by an automated system rather than a person?",
+            "inspect": ["`record.actor`", "`record.action`"],
+            "focus": "Judge the author in `record.actor`, not the subject matter.",
         },
         "criteria": {
             "true": {"what": "Emitted by a bot, cron job, monitor or pipeline",
@@ -90,8 +99,9 @@ _SIGNAL_QUESTIONS: dict = {
     "carries_work": {
         "type": "noul",
         "instructions": {
-            "question": "Would this record help someone infer what process this corpus is a record of?",
-            "focus": "Is the work itself visible here, or only the envelope?",
+            "question": "Would `record` help someone infer what process this corpus is a record of?",
+            "inspect": ["`record.subject`", "`record.body`"],
+            "focus": "Is the work itself visible in those fields, or only the envelope?",
         },
         "criteria": {
             "true": {"what": "Names the subject matter of the work concretely",
@@ -147,7 +157,9 @@ class SignalFilter:
         return self._jev.available
 
     def read(self, state) -> Signal:
-        answers = self._jev.ask(state, _SIGNAL_QUESTIONS)
+        # Nested under `record` so the questions' backticked paths resolve. A flat
+        # state with questions naming `record.body` points at nothing.
+        answers = self._jev.ask({"record": state}, _SIGNAL_QUESTIONS)
         if not answers:
             return Signal()
 
@@ -509,6 +521,10 @@ _AMBIGUOUS_BAR = 0.55
 # How a (process, step) pair is spelled as one Choice option, and read back.
 _PAIR_SEP = " > "
 
+# Named once, because the ledger has to record the question exactly as the model
+# was asked it — a paraphrase in the artefact would be a different question.
+_STEP_QUESTION = "Which stage does `record` perform?"
+
 
 def _pair_options(vocab) -> dict[str, None]:
     """The whole `Process > Step` space as Choice options.
@@ -572,7 +588,7 @@ class RecordAssigner:
             "step": {
                 "type": "choice",
                 "instructions": {
-                    "question": "Which stage does `record` perform?",
+                    "question": _STEP_QUESTION,
                     "focus": "The stage the record ACCOMPLISHES, not one it merely "
                              "mentions. Use `thread_context` to read a short reply.",
                 },
@@ -609,12 +625,18 @@ class JevReading:
     property worth checking in review: none of these can subtract.
     """
 
-    def __init__(self, jev=None, log=None, signals=True, labels=True, assign=True):
+    def __init__(self, jev=None, log=None, signals=True, labels=True, assign=True,
+                 ledger=None):
         self._log = log or (lambda m: None)
         if jev is None:
             from induction.jev_call import Jev
             jev = Jev(log=self._log)
         self.jev = jev
+        # Where recordable decisions go. The gate is deliberately NOT recorded
+        # per record: it asserts nothing about any record, only about what was
+        # worth reading, and one row per gated record would bury the decisions a
+        # reader can actually dispute. It stays a count.
+        self.ledger = ledger
         self.signals = SignalFilter(jev=jev, log=self._log) if signals else None
         self.labels = LabelScreen(jev=jev, log=self._log) if labels else None
         self.assigner = RecordAssigner(jev=jev, log=self._log) if assign else None
@@ -688,7 +710,7 @@ class JevReading:
         return strong
 
     # -- 3. labels ----------------------------------------------------------
-    def screen_labels(self, vocab, log):
+    def screen_labels(self, vocab, log, abstraction=None):
         """Drop proposed steps that name the envelope rather than an achievement."""
         if self.labels is None or not self.labels.available or not vocab:
             return vocab
@@ -699,6 +721,12 @@ class JevReading:
         if not dropped:
             return vocab
         self.n_labels_dropped = len(dropped)
+        self._record_labels(dropped)
+        if abstraction is not None:
+            abstraction.dropped_labels = [
+                {"process": process, "label": label, "scope": scope,
+                 "score": score, "why": why}
+                for process, label, scope, score, why in dropped]
         for process, label, scope, score, why in dropped:
             # The line names the scope that failed and says what that costs. A
             # single fixed sentence for every drop, as the first version had, was
@@ -706,6 +734,30 @@ class JevReading:
             log(f"[abstraction] dropped step {label!r} from {process}: "
                 f"{scope.replace('_', ' ')} {score:.2f} — {why}")
         return ReadVocabulary(steps_by_process=kept, loose=kept_loose)
+
+    def _record_labels(self, dropped: list) -> None:
+        """A dropped label is the hardest decision to notice, so it is recorded.
+
+        A step that survives is visible on the page; a step that was proposed and
+        removed leaves no trace at all, and its absence silently reshapes every
+        flow the reader is looking at. This is the decision most worth being able
+        to argue with.
+        """
+        if self.ledger is None:
+            return
+        from induction.decisions import LABEL, Decision
+
+        for process, label, scope, score, why in dropped:
+            self.ledger.add(Decision(
+                kind=LABEL,
+                about=f"{process} > {label}",
+                question=_LABEL_QUESTIONS[f"discriminates_{scope}"]
+                         ["instructions"]["question"],
+                qtype="noul",
+                answer=round(score, 4),
+                confidence=max(score, 1.0 - score),
+                outcome=f"dropped from the vocabulary — {why}",
+            ))
 
     # -- 4. place -----------------------------------------------------------
     def place(self, abstraction, threads: list, vocab, events, m, log) -> tuple[list, dict]:
@@ -758,6 +810,7 @@ class JevReading:
             kept_records = []
             for r, placed in zip(asked, results):
                 placements[r["id"]] = placed
+                self._record_step(r["id"], placed)
                 if placed.placed and placed.ambiguous:
                     # Answered, and the answer was a tie. This is the only case
                     # that holds a record back.
@@ -782,6 +835,37 @@ class JevReading:
                 f"confidently; {len(ambiguous)} fit several steps equally and are "
                 f"listed with their distribution rather than read")
         return kept_threads, placements
+
+    def _record_step(self, record_id: str, placed: "Assignment") -> None:
+        """What the record was offered, what it picked, and what happened next.
+
+        `derived` carries the per-process mass this code adds up afterwards,
+        separately from `distribution`, which is what the model actually said.
+        The two are different claims and a reader should be able to tell them
+        apart: one is an answer, the other is arithmetic over it.
+        """
+        if self.ledger is None or not placed.placed:
+            return
+        from induction.decisions import STEP, Decision
+
+        if placed.ambiguous:
+            outcome = ("held back as ambiguous — no process held a clear majority "
+                       "of the mass, so there was nothing for the reading pass to "
+                       "settle; shown with its distribution rather than read")
+        else:
+            outcome = ("sent to the generative pass, which decides the step and "
+                       "quotes the text it read it from")
+        self.ledger.add(Decision(
+            kind=STEP,
+            about=record_id,
+            question=_STEP_QUESTION,
+            qtype="choice",
+            answer=f"{placed.process}{_PAIR_SEP}{placed.step}" if placed.process else placed.step,
+            confidence=placed.confidence,
+            distribution=dict(placed.distribution),
+            derived=placed.by_process(),
+            outcome=outcome,
+        ))
 
     # -- 5. report ----------------------------------------------------------
     def report(self, abstraction, log) -> None:

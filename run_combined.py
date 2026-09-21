@@ -152,6 +152,10 @@ def main(argv=None) -> int:
     # real Anthropic namer when the tier is on. `--names off` keeps raw verbs.
     if args.demo:
         from tests.combined_fixture import demo_namer
+        # The typed tier's decisions, gathered across correlation and the reading
+        # pass, attached before emit so they reach model.json.
+        m.decisions = tier.decisions() if tier is not None else None
+
         names = infer_names(m, namer=demo_namer, log=prog)
     else:
         names = infer_names(m, enable=(tier.names_enable() and args.names != "off"), log=prog)

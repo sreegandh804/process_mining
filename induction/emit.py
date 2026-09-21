@@ -57,6 +57,18 @@ TIER_LEGEND = {
     "model": "embedding / LLM inference (not built in the baseline)",
 }
 
+# What `typed_decisions` is, said in the artefact so it travels with the data.
+TYPED_DECISIONS_NOTE = (
+    "Decisions a typed model (Jev) was asked, where a reader can see the "
+    "consequence and might dispute it: which stage a record performs, why two "
+    "records are one case, why a proposed step is absent from the vocabulary, "
+    "and why a cluster is flagged as a look-alike. Each row carries the question "
+    "as asked, the options and their probabilities, and what the ENGINE did with "
+    "the answer — which is not always what the answer alone would suggest. "
+    "Calls that only narrowed what was looked at (the record gate, the discovery "
+    "sample) assert nothing about any record and are counted, not listed."
+)
+
 
 def build_model(m: InducedModel) -> dict:
     shaped = m.shaped
@@ -75,6 +87,7 @@ def build_model(m: InducedModel) -> dict:
                              "data-derived rationales — structure is identical either way."
                              % m.profile_id),
             "tier_legend": TIER_LEGEND,
+            "typed_decisions_note": TYPED_DECISIONS_NOTE,
             "what_it_cannot_conclude": disclaimers_for(m),
             "stats": _stats(m),
         },
@@ -87,6 +100,13 @@ def build_model(m: InducedModel) -> dict:
         "same_activity_merges": [mg.to_dict() for mg in m.merges],
         "gaps": [g.to_dict() for g in m.gaps],
         "orphans": [o.to_dict() for o in m.orphans],
+        # Every typed decision whose consequence a reader can see, with the
+        # question it answered, what it could have picked, and what the engine
+        # did next. In the artefact rather than only in the page, because the
+        # page is a view of this file and a claim that existed only in HTML would
+        # be one no downstream tool could check. Empty list when the typed tier
+        # did not run — never absent, so a consumer need not special-case it.
+        "typed_decisions": m.decisions.to_list() if m.decisions is not None else [],
         "members": [
             {
                 "id": e.id,

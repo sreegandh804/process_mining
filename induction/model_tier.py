@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -83,12 +83,26 @@ class ModelTier:
     def names_enable(self) -> bool:
         return self.active
 
+    # One ledger per invocation, shared by every seam that records a decision, so
+    # the artefact holds them in the order the run made them. Built lazily and
+    # only when the typed tier is on — with it off there is nothing to record.
+    _ledger: object = field(default=None, repr=False, compare=False)
+
+    def decisions(self):
+        """The run's decision ledger, or None when the typed tier never ran."""
+        if not (self.active and self.typed):
+            return None
+        if self._ledger is None:
+            from induction.decisions import Ledger
+            object.__setattr__(self, "_ledger", Ledger())
+        return self._ledger
+
     def reading(self, log=None):
         """The typed tier for the reading pass, or None when it is off."""
         if not (self.active and self.typed):
             return None
         from induction.jev_reading import JevReading
-        return JevReading(log=log)
+        return JevReading(log=log, ledger=self.decisions())
 
     def mapper(self, log=None):
         """Tier-1 activity mapper (verbs -> activities), or None when off."""
@@ -117,7 +131,7 @@ class ModelTier:
             # A gate in front, not a replacement: the judge still writes the
             # sentence the join carries, and a pair the gate cannot read is a
             # pair the judge sees exactly as it did before.
-            judge = GatedJudge(judge, log=log)
+            judge = GatedJudge(judge, log=log, ledger=self.decisions())
         if self.hybrid:
             return SemanticProvider(judge=judge, embedder=VoyageEmbedder())
         return SemanticProvider(judge=judge)

@@ -89,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
     # gated on records-per-activity and simply won't fire on a git corpus.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
                                    jev=tier.reading(log=prog))
+    # The typed tier's decisions, gathered across correlation and the reading
+    # pass, attached before emit so they reach model.json.
+    m.decisions = tier.decisions() if tier is not None else None
+
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")

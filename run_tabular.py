@@ -113,6 +113,10 @@ def _run_detected(args, tier: ModelTier, prog: Progress) -> int:
     # back names keyed on kind ids that no longer mean the same thing.
     activities = infer_activities(m, tier.mapper(log=prog), tier.classifier(log=prog), log=prog,
                                    jev=tier.reading(log=prog))
+    # The typed tier's decisions, gathered across correlation and the reading
+    # pass, attached before emit so they reach model.json.
+    m.decisions = tier.decisions() if tier is not None else None
+
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
     json_path = write_json(m, out_dir / "model.json")

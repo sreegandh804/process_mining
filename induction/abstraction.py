@@ -271,6 +271,11 @@ class Abstraction:
     # nothing fitted was indistinguishable from a record everything fitted.
     gated: list[dict] = field(default_factory=list)
     ambiguous: list[dict] = field(default_factory=list)
+    # Steps discovery proposed that the screen removed. Kept because a dropped
+    # label is the hardest decision on the page to notice: a step that survives
+    # is visible, one that was taken out leaves no trace and quietly reshapes
+    # every flow a reader is looking at.
+    dropped_labels: list[dict] = field(default_factory=list)
     # Per-pass counts for the run header, so no gate is ever silent.
     jev_counts: dict = field(default_factory=dict)
 
@@ -710,7 +715,7 @@ def _read_the_records(abstraction: "Abstraction", m, events, classifier, log=Non
         log(f"[abstraction] activity discovery skipped ({type(e).__name__}: {e})")
         return
     if jev is not None:
-        vocab = jev.screen_labels(vocab, log)
+        vocab = jev.screen_labels(vocab, log, abstraction)
     activities = vocab.activities
     processes = vocab.processes
     if len(activities) < 2:
@@ -1352,7 +1357,7 @@ def _reproject(m, abstraction: "Abstraction", log=None, jev=None) -> None:
             # leaving the question blank. It never overrides a profile's verdict
             # and never un-flags one.
             from induction.honesty import triage_unflagged
-            triage_unflagged(kinds, jev=jev.jev, log=log)
+            triage_unflagged(kinds, jev=jev.jev, log=log, ledger=jev.ledger)
         m.kinds = kinds
         placed = len(abstraction.by_case)
         log(f"abstraction: re-segmented on what the records say — {before} kind(s) "
