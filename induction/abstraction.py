@@ -98,17 +98,19 @@ class AnthropicActivityMapper(ActivityMapper):
     def map(self, vocab: list[dict]) -> dict[str, str]:
         if not vocab or not os.environ.get("ANTHROPIC_API_KEY"):
             return {}
-        from induction.anthropic_call import client, with_backoff
+        from induction.anthropic_call import DEFAULT_OPUS, client, effort_kwargs, with_backoff
         try:
             api = client()
         except ImportError:
             self._log("[abstraction] activity mapping needs the Anthropic SDK: pip install anthropic")
             return {}
         try:
+            use_model = self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", DEFAULT_OPUS)
+
             def once():
                 # Streamed for the same reason the reading pass is — see `_call`.
                 with api.messages.stream(
-                    model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
+                    model=use_model, **effort_kwargs(use_model),
                     max_tokens=_MAP_TOKENS,
                     system=self._SYSTEM,
                     messages=[{"role": "user", "content":
@@ -1106,7 +1108,7 @@ class AnthropicRecordClassifier(RecordClassifier):
         """
         if not os.environ.get("ANTHROPIC_API_KEY"):
             return {}, ""
-        from induction.anthropic_call import client, with_backoff
+        from induction.anthropic_call import DEFAULT_OPUS, client, effort_kwargs, with_backoff
         api = client()
 
         # STREAMED, not awaited in one blocking call. These ceilings are 8k and
@@ -1117,9 +1119,11 @@ class AnthropicRecordClassifier(RecordClassifier):
         # the connection fed while the model works. Nothing else changes — same
         # prompt, same ceiling, same tokens, same reply; `get_final_message`
         # hands back exactly what `create` would have returned.
+        use_model = self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", DEFAULT_OPUS)
+
         def once():
             with api.messages.stream(
-                model=self.api_model or os.environ.get("INDUCTION_ACTIVITY_MODEL", "claude-opus-5"),
+                model=use_model, **effort_kwargs(use_model),
                 max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": content}],
             ) as stream:
@@ -1127,6 +1131,11 @@ class AnthropicRecordClassifier(RecordClassifier):
 
         msg = with_backoff(once, label="activity reading", log=self._log)
         text = "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        if getattr(msg, "stop_reason", None) == "refusal":
+            # Claude Opus 5.5 runs broader safety classifiers; a declined batch
+            # comes back with no text. Name it, so it is not read as "nothing fit".
+            self._log("[abstraction] the model declined this batch (stop_reason: refusal) "
+                      "— its records stay unread")
         if getattr(msg, "stop_reason", None) == "max_tokens":
             # A truncated reply is unparseable JSON, and unparseable JSON is an
             # empty dict two frames later. Say it here, where the cause is known.

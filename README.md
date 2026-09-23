@@ -106,8 +106,8 @@ for the semantic judge. Each seam takes its own model, so the expensive one can
 stay sharp while the chatty one stays cheap:
 
 ```bash
-INDUCTION_ACTIVITY_MODEL=claude-opus-5 \
-INDUCTION_NAMING_MODEL=claude-opus-5 \
+INDUCTION_ACTIVITY_MODEL=claude-opus-5-5 \
+INDUCTION_NAMING_MODEL=claude-opus-5-5 \
 INDUCTION_SEMANTIC_MODEL=claude-haiku-4-5 \
 python3 run_email.py --path samples/enron
 ```
