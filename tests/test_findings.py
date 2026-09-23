@@ -86,6 +86,24 @@ def test_a_single_wait_is_never_called_a_bottleneck():
     assert out["headline"]["kind"] != "bottleneck"
 
 
+def test_a_rare_slow_detour_does_not_headline_over_the_common_wait():
+    # Found on a real permit log: a 24-hour detour taken by a handful of cases
+    # out-ranked, by median, the wait every case pays. Impact is length x
+    # frequency, so the common 2-day wait must win and its share must be of
+    # all the time spent, not of the detour's own few runs.
+    runs = [_run(f"c{i}", ("raised", "2024-01-01"), ("approved", "2024-01-03"),
+                 ("paid", "2024-01-04")) for i in range(40)]
+    runs += [_run(f"d{i}", ("raised", "2024-01-01"), ("held", "2024-01-02"),
+                  ("approved", "2024-01-12"), ("paid", "2024-01-13")) for i in range(5)]
+    m = measure(runs, CANON)["metrics"]
+    lw = m["longest_wait"]
+    assert (lw["from"], lw["to"]) == ("raised", "approved")
+    assert lw["measured"] == 40 and lw["of_timed"] == 45
+    held = next(w for w in m["waits"] if w["from"] == "held")
+    assert held["median_s"] > lw["median_s"]          # slower, but rarer
+    assert held["share_pct"] < lw["share_pct"]
+
+
 def test_off_route_rework_and_not_completed_are_counted_with_their_runs():
     runs = [_usual(f"ok{i}") for i in range(5)]
     runs.append(_run("skip", ("raised", "2024-01-01"), ("paid", "2024-01-05")))

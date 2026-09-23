@@ -1154,8 +1154,8 @@ function perfBlock(p){
   const tiles = [
     tile('End-to-end time (median)', cy.insufficient?null:cy.median,
          cy.insufficient?'':`slowest 10%: ${cy.slowest_10pct} · measured on ${cy.measured} of ${cy.of}`, cy.runs, 'end-to-end time'),
-    tile('Longest wait between steps', lw.insufficient?null:lw.median,
-         lw.insufficient?'':`${cap(lw.from)} → ${cap(lw.to)} · ${lw.share_pct}% of total time`, lw.runs,
+    tile('Biggest wait between steps', lw.insufficient?null:lw.share_pct+'% of all time',
+         lw.insufficient?'':`${cap(lw.from)} → ${cap(lw.to)} · median ${lw.median} · ${lw.measured} of ${lw.of_timed}`, lw.runs,
          lw.insufficient?'':`the wait from ${cap(lw.from)} to ${cap(lw.to)}`, hot==='bottleneck'),
     tile('Off the most common route', off.no_usual_route?null:off.pct+'%',
          off.no_usual_route?'no usual route exists':`${off.count} of ${off.of} ${items}`, off.runs, 'off the most common route', hot==='exception'),

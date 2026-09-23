@@ -73,7 +73,12 @@ clone, no network, no key needed.
 |---|---|---|
 | **`samples/finance/`** | A small firm's **invoice approval & payment**: an invoice tracker (raised → submitted → approved → paid) plus a **bank payments** export that cross-references it on `invoice_id`. Deliberately messy — blank dates, a duplicate row, three date formats, a payment for an invoice that doesn't exist. | `python3 run_tabular.py` |
 | **`samples/grants/`** | A **grant-making tracker** (applied → reviewed → decided → paid → reported). A second, unrelated domain through the same engine — a new `TableSpec`, not new code. | `python3 run_tabular.py --dir samples/grants` |
+| **`samples/permits/`** | A real **municipal permit-application** event log (300 applications, 1,725 events, 24 activities). The held-out check: nothing in the engine was tuned on it, and the shape is detected, not configured. See `samples/permits/README.md`. | `python3 run_tabular.py --file samples/permits/permits.csv --entity application` |
 | **`samples/enron/`** | **263 real emails** from 3 Enron custodians (`kaminski-v`, `germany-c`, `jones-t`), curated so every subject-thread is a **complete conversation** — 76 threads, all ≥2 messages, no stray singletons (the engine induces 57 runs, 0 orphans). The genuine thin end: real RFC-822 with **no `In-Reply-To` headers at all**, so threads are earned from subject + fuzzy text/time, not a given key. | `python3 run_email.py --path samples/enron` |
+
+Any public XES log (the BPI Challenges on 4TU.ResearchData, e.g. the 1.3 MB
+BPI 2013 incidents log) converts with `tools/xes_to_csv.py log.xes.gz out.csv
+--max-cases 300` and then runs with `--file`.
 
 The Enron sample is a subset of the public
 **[Enron email dataset](https://www.kaggle.com/datasets/wcukierski/enron-email-dataset)**

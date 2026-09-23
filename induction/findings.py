@@ -153,21 +153,27 @@ def measure(runs: list[dict], canon: list[str], items: str = "runs", item: str =
     else:
         m["cycle"] = {"insufficient": True, "measured": len(cycle), "of": n}
 
+    # WHERE THE TIME GOES is ranked by the total time a wait costs across ALL
+    # timed runs, not by its median. Ranked by median, a slow path taken by 13 of
+    # 300 permit applications headlined as "83% of the time" while the typical
+    # application finished in under an hour. Impact is length x frequency; a
+    # sum over every run is exactly that, and its share is of the time spent on
+    # the whole process, so a rare detour cannot claim to be the process.
+    all_time = sum(cycle.values())
     ranked = []
     for (a, b), per in waits.items():
         if len(per) < MIN_RUNS:
             continue
         med = median(per.values())
-        # Share of the end-to-end time this wait accounts for, over the same runs:
-        # a ratio of sums, so one extreme run cannot claim the whole process.
-        tot = sum(cycle.get(k, 0) for k in per)
-        share = (sum(per.values()) / tot) if tot else 0.0
+        total = sum(per.values())
         ranked.append({"from": a, "to": b, "median_s": med,
                        "median": human_duration(med, precise),
-                       "share_pct": round(100 * share), "measured": len(per),
+                       "total_s": total,
+                       "share_pct": round(100 * total / all_time) if all_time else 0,
+                       "measured": len(per), "of_timed": len(cycle),
                        "runs": sorted(per),
                        "offsystem": len(offsystem & set(per))})
-    ranked.sort(key=lambda w: (-w["median_s"], w["from"], w["to"]))
+    ranked.sort(key=lambda w: (-w["total_s"], -w["median_s"], w["from"], w["to"]))
     m["waits"] = ranked
     m["longest_wait"] = ranked[0] if ranked else {"insufficient": True}
 
@@ -219,8 +225,9 @@ def _headline(m: dict, items: str) -> dict:
     # is trivially "all of the time", which says nothing about where to look.
     if (not lw.get("insufficient") and len(m.get("waits") or []) >= 2
             and lw.get("share_pct", 0) >= _BOTTLENECK_SHARE * 100):
-        text = (f"The wait from {_cap(lw['from'])} to {_cap(lw['to'])} takes a median of {lw['median']}, "
-                f"{lw['share_pct']}% of the end-to-end time.")
+        text = (f"The wait from {_cap(lw['from'])} to {_cap(lw['to'])} accounts for "
+                f"{lw['share_pct']}% of all the time spent on these {items} "
+                f"(median {lw['median']}, in {lw['measured']} of {lw['of_timed']}).")
         caveat = None
         if lw.get("offsystem"):
             caveat = (f"{lw['offsystem']} of these {items} also have a step no system recorded, "
