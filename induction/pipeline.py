@@ -19,7 +19,7 @@ rather than aspirational; mixing sources is then just concatenating them, which
 is exactly how cross-source fuzzy correlation gets its chance to fire.
 
 We keep `shaped` (the substrate, with `raw` intact) beside the induced model so
-the divergence hook (belief vs data) has both sides to compare later.
+the owner review (belief vs data, `review.py`) has both sides to compare.
 """
 
 from __future__ import annotations

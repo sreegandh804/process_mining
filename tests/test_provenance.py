@@ -54,5 +54,7 @@ def test_cost_and_divergence_are_honest_stubs(mini_model):
     # slots exposed, figures NOT fabricated
     for slot in doc["cost_value"]["per_step"].values():
         assert slot == {"money": None, "effort": None}
-    assert doc["divergence"]["status"] == "hook"
+    # Divergence is live now (owner review), but with no review given it holds
+    # nothing: a disagreement is only ever recorded, never invented.
+    assert doc["divergence"]["status"] == "awaiting review"
     assert doc["divergence"]["items"] == []

@@ -42,6 +42,7 @@ from pathlib import Path
 from induction.abstraction import infer_activities
 from induction.adapters import Shaped, email_mbox, github_api
 from induction.emit import write_json
+from induction import review
 from induction.inspector import write_html
 from induction.model_tier import resolve
 from induction.naming import infer_names
@@ -99,7 +100,11 @@ def main(argv=None) -> int:
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     ap.add_argument("--out-dir", default="out")
+    ap.add_argument("--corrections", metavar="FILE",
+                    help="an owner review exported from the inspector (Export review); "
+                         "confirmed claims are marked, disputed ones shown beside the records")
     args = ap.parse_args(argv)
+    corrections = review.load(args.corrections)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
 
@@ -166,8 +171,10 @@ def main(argv=None) -> int:
         names = infer_names(m, enable=(tier.names_enable() and args.names != "off"), log=prog)
 
     out = Path(args.out_dir)
-    write_json(m, out / "model.json")
-    write_html(m, out / "inspector.html", names=names, activities=activities)
+    write_json(m, out / "model.json", names=names, activities=activities,
+               corrections=corrections)
+    write_html(m, out / "inspector.html", names=names, activities=activities,
+               corrections=corrections)
 
     cross = [c for c in m.cases.values()
              if len({("mail" if e.startswith("email:") else "sys") for e in c.entity_ids}) > 1]

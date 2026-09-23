@@ -27,6 +27,7 @@ from pathlib import Path
 from induction.abstraction import infer_activities
 from induction.adapters.tabular import EventCol, TableSpec
 from induction.emit import write_json
+from induction import review
 from induction.inspector import write_html
 from induction.model_tier import ModelTier, resolve
 from induction.naming import infer_names
@@ -119,8 +120,11 @@ def _run_detected(args, tier: ModelTier, prog: Progress) -> int:
 
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
-    json_path = write_json(m, out_dir / "model.json")
-    html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)
+    corrections = review.load(args.corrections)
+    json_path = write_json(m, out_dir / "model.json", names=names, activities=activities,
+                           corrections=corrections)
+    html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities,
+                           corrections=corrections)
     print(_summary(m))
     print(f"[run] wrote {json_path}  ({json_path.stat().st_size // 1024} KB)")
     print(f"[run] wrote {html_path}  — open it in a browser")
@@ -141,6 +145,9 @@ def main(argv=None) -> int:
     ap.add_argument("--actor-column", help="name the actor column")
     ap.add_argument("--xlsx", action="store_true", help="read .xlsx instead of .csv (needs openpyxl)")
     ap.add_argument("--out-dir", default="out")
+    ap.add_argument("--corrections", metavar="FILE",
+                    help="an owner review exported from the inspector (Export review); "
+                         "confirmed claims are marked, disputed ones shown beside the records")
     ap.add_argument("--profile", choices=["generic", "accounting"], default="generic")
     ap.add_argument("--names", choices=["auto", "off", "llm"], default="auto",
                     help="model-tier naming/abstraction (default: auto — on if ANTHROPIC_API_KEY "
@@ -158,6 +165,7 @@ def main(argv=None) -> int:
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
+    corrections = review.load(args.corrections)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
     tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev,
@@ -191,8 +199,10 @@ def main(argv=None) -> int:
                                    jev=tier.reading(log=prog))
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
-    json_path = write_json(m, out_dir / "model.json")
-    html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)
+    json_path = write_json(m, out_dir / "model.json", names=names, activities=activities,
+                           corrections=corrections)
+    html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities,
+                           corrections=corrections)
     print(_summary(m))
     print(f"[run] wrote {json_path}  ({json_path.stat().st_size // 1024} KB)")
     print(f"[run] wrote {html_path}  — open it in a browser")

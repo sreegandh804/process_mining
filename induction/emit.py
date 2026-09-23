@@ -95,8 +95,14 @@ TYPED_DECISIONS_NOTE = (
 )
 
 
-def build_model(m: InducedModel) -> dict:
+def build_model(m: InducedModel, names: dict | None = None, activities: dict | None = None,
+                corrections: dict | None = None) -> dict:
     shaped = m.shaped
+    # Performance and review are measured on the same view the inspector draws,
+    # so the file and the page can never disagree about a figure.
+    from induction.inspector import build_view
+    view = build_view(m, names, activities, corrections)
+    review = view["review"]
     kind_of_case = {cid: k.id for k in m.kinds for cid in k.case_ids}
 
     persons = [e for e in shaped.entities if e.type == "person"]
@@ -153,13 +159,23 @@ def build_model(m: InducedModel) -> dict:
                     "Populating them is a product concern, not a build concern.",
             "per_step": {s.action: {"money": None, "effort": None} for s in m.steps},
         },
+        # Measured, never estimated: per process, the end-to-end time, the waits
+        # between steps, the share of runs off the usual route, rework — each with
+        # the runs behind it and how many runs it could be measured on.
+        "performance": [
+            {"process": p["id"], "name": p["name"], **p["performance"]}
+            for p in view["processes"] if p.get("performance")
+        ],
         "divergence": {
-            "status": "hook",
-            "note": "We keep `raw` beside inferred structure so a process owner can "
-                    "be shown the induced model and correct only the low-confidence "
-                    "(`heuristic`/`model`) parts. Disagreements would surface here as "
-                    "belief-vs-data divergences. The loop is described, not built.",
-            "items": [],
+            "status": "live" if (corrections or {}) else "awaiting review",
+            "note": "Claims a process owner disputed, each beside what the records "
+                    "still show. A dispute never deletes a claim: the owner can be "
+                    "right about work no system saw, and the records can be right "
+                    "about work the owner describes differently. Answers come from the "
+                    "inspector's 'Export review' file, passed back with --corrections.",
+            "items": review["divergence"],
+            "confirmed": review["n_confirmed"],
+            "unmatched_answers": review["unmatched"],
         },
     }
 
@@ -187,9 +203,10 @@ def _stats(m: InducedModel) -> dict:
     }
 
 
-def write_json(m: InducedModel, path: str | Path) -> Path:
+def write_json(m: InducedModel, path: str | Path, names: dict | None = None,
+               activities: dict | None = None, corrections: dict | None = None) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    model = build_model(m)
+    model = build_model(m, names, activities, corrections)
     path.write_text(to_json(model, indent=2))
     return path

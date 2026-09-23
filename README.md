@@ -314,11 +314,52 @@ The **LLM tier is on by default** (activity naming + reading; needs
 baseline and says so on the first line; `--no-llm` forces that baseline. Run the
 tests with `pytest`.
 
+## Process Performance and owner review
+
+Each process card in the inspector opens with a **Process Performance** block:
+end-to-end time, the longest wait between two steps, the share of runs off the
+most common route, runs that never reached the final step, and rework. Under the
+tiles is one **key finding**, in plain words:
+
+> The wait from Approved to Paid takes a median of 15 days, 79% of the end-to-end time.
+> *Measured on 5 invoices with dates on both steps.* · View 5 invoices →
+
+Every figure is **measured, never estimated** (`induction/findings.py`, no model
+involved), and each one opens to the runs behind it. The guards are what make it
+safe to hand to a director:
+
+- a time is only measured between two steps that **both** carry a date, and the
+  coverage is printed (`measured on 13 of 16`); an undated step is never bridged;
+- under 5 runs, nothing is measured — the card says *too few*, never zero;
+- one wait is never called a bottleneck (it is trivially 100% of the time);
+- where a slow run also has a step no system recorded, the finding says part of
+  the wait may be off-system work;
+- **cost is not shown**, and the page says why: the records carry no rate.
+
+It runs on the same step sequence the card draws, so it works unchanged for
+invoices, grants, email threads or a repository.
+
+**Owner review.** Every statement — the process, each step, the key finding —
+has *Confirm* / *Dispute* / *Add note*. **Export review** downloads
+`corrections.json`; pass it back and the next run records the review:
+
+```bash
+python3 run_tabular.py --corrections ~/Downloads/corrections.json
+```
+
+Confirmed claims are marked *Confirmed by process owner*. A disputed claim is
+**not removed**: it is shown beside what the records still say (*Owner: we never
+submit invoices. Records: Submitted appears in 12 of 16 invoices.*) and written
+to `model.json` under `divergence` — belief and data side by side. Claim ids come
+from the claim's content, so an answer lands on the same claim next run; an
+answer whose claim no longer exists is listed, never dropped. `--corrections` is
+on every runner.
+
 ## What it can't conclude
 
 The issue/PR/review timeline directly (inferred, marked so) · true order for thin
 data · whether a `heuristic` join is *right* (scored; reads as uncertain) ·
-cost/value (slots exposed, empty) · exactly where one kind ends and the next
+cost/value (slots exposed, empty — times are measured, money is not) · exactly where one kind ends and the next
 begins (inferred, revisable).
 
 ---
