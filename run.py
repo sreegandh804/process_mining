@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from induction.emit import write_json
+from induction import review
 from induction.inspector import write_html
 from induction.pipeline import run_pipeline
 
@@ -33,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--slug", default="pallets/flask")
     ap.add_argument("--raw-dir", default="data/raw")
     ap.add_argument("--out-dir", default="out")
+    ap.add_argument("--corrections", metavar="FILE",
+                    help="an owner review exported from the inspector (Export review); "
+                         "confirmed claims are marked, disputed ones shown beside the records")
     ap.add_argument("--no-thin", action="store_true", help="skip the thin changelog source")
     ap.add_argument("--with-github", action="store_true",
                     help="also load the cached GitHub Issues/PR corpus, so cross-source "
@@ -57,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
+    corrections = review.load(args.corrections)
 
     from induction.progress import from_flags
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
@@ -100,8 +105,10 @@ def main(argv: list[str] | None = None) -> int:
 
     names = infer_names(m, enable=tier.names_enable(), log=prog)
     out_dir = Path(args.out_dir)
-    json_path = write_json(m, out_dir / "model.json")
-    html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities)
+    json_path = write_json(m, out_dir / "model.json", names=names, activities=activities,
+                           corrections=corrections)
+    html_path = write_html(m, out_dir / "inspector.html", names=names, activities=activities,
+                           corrections=corrections)
 
     s = _summary(m)
     print(s)

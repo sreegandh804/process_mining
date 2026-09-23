@@ -33,6 +33,7 @@ from pathlib import Path
 from induction.abstraction import infer_activities
 from induction.adapters import email_mbox
 from induction.emit import write_json
+from induction import review
 from induction.inspector import write_html
 from induction.model_tier import resolve
 from induction.naming import infer_names
@@ -48,6 +49,9 @@ def main(argv=None) -> int:
     ap.add_argument("--slug", default=None, help="a name for this mailbox (default: folder name)")
     ap.add_argument("--max-messages", type=int, default=3000, help="slice cap (newest first not guaranteed)")
     ap.add_argument("--out-dir", default="out")
+    ap.add_argument("--corrections", metavar="FILE",
+                    help="an owner review exported from the inspector (Export review); "
+                         "confirmed claims are marked, disputed ones shown beside the records")
     ap.add_argument("--names", choices=["auto", "off", "llm"], default="auto",
                     help="model tier (default: auto — on if ANTHROPIC_API_KEY is set, else the "
                          "deterministic baseline). 'llm' insists on it.")
@@ -69,6 +73,7 @@ def main(argv=None) -> int:
                     help="stream each inferred join / kind / gap as it is decided")
     ap.add_argument("--quiet", action="store_true", help="suppress stage progress")
     args = ap.parse_args(argv)
+    corrections = review.load(args.corrections)
 
     prog = from_flags(quiet=args.quiet, verbose=args.verbose)
     tier = resolve(args.names, no_llm=args.no_llm, no_jev=args.no_jev,
@@ -104,8 +109,10 @@ def main(argv=None) -> int:
     names = infer_names(m, enable=tier.names_enable(), log=prog)
 
     out = Path(args.out_dir)
-    write_json(m, out / "model.json")
-    write_html(m, out / "inspector.html", names=names, activities=activities)
+    write_json(m, out / "model.json", names=names, activities=activities,
+               corrections=corrections)
+    write_html(m, out / "inspector.html", names=names, activities=activities,
+               corrections=corrections)
 
     print(f"  {n_messages} messages · {len(m.cases)} threads/runs · "
           f"{sum(1 for k in m.kinds if k.rejected)} flagged kinds · {len(m.orphans)} orphans")

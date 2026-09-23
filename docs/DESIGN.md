@@ -262,9 +262,9 @@ someone writes a 30-line profile for it.
   flagged, not deleted, so a reader can disagree.
 - **Unknowns** — missing actor / time / order is marked `unknown`. Absence is a
   finding, not a blank to fill.
-- **Divergence hook** — `raw` is kept beside the inferred structure so a later
-  owner-validation step can compare belief against data. The loop is *described*
-  below, not built.
+- **Divergence** — `raw` is kept beside the inferred structure so an owner's
+  review can be set against the data. A minimal loop is built (confirm/dispute →
+  `corrections.json` → next run); see "Owner review" below.
 - **Confidence everywhere** — no node or edge without a tier and evidence.
 
 ---
@@ -390,15 +390,24 @@ and each would enter as a lower, clearly-marked tier:
 
 Also stated-but-unbuilt (hooks are in place):
 
-- **The owner-validation loop (belief vs data).** Induce the process from
-  evidence *first* (asking up front yields the official version, not the real
-  one); show the owner the draft anchored to evidence; let them correct only the
-  low-confidence parts; surface disagreements as **divergences**, keeping both
-  sides and marking which is belief and which is evidence. Corrections raise a
-  claim's tier and are themselves recorded as evidence. `model.json.divergence`
-  is the empty hook.
+- ~~**The owner-validation loop (belief vs data).**~~ **Built, in miniature**
+  (`induction/review.py`). The process is induced from evidence *first* (asking
+  up front yields the official version, not the real one); the owner sees the
+  draft anchored to evidence and can confirm or dispute each claim — the process,
+  each step, the key finding. The answers round-trip through `corrections.json`
+  and the next run shows them: confirmed claims marked, disputed ones kept
+  **beside** what the records still show, and written to `model.json.divergence`.
+  A dispute never deletes a claim — the owner can be right about work no system
+  saw, and the records can be right about work the owner describes differently.
+  Claim ids are hashes of the claim's content, so an answer survives a re-run;
+  when the content changes (renamed step, new data) the answer is reported as
+  unmatched rather than silently re-attached. Not built yet: a confirmation
+  raising a claim's tier inside the engine, and reviewer identity / sign-off.
 - **Cost / value.** Slots exist per step and per engagement (money + effort;
-  revenue + outcomes). Populating them is product work, not build work.
+  revenue + outcomes). *Time* is now measured per step (`induction/findings.py`:
+  end-to-end time, waits between steps, off-route rate, rework, not completed);
+  **money is still not produced**, because no source carries a rate. A rate card
+  per role or step turns each measured wait into cost directly.
 
 ---
 
@@ -419,9 +428,13 @@ Also stated-but-unbuilt (hooks are in place):
 - **What "actionable" means.** Not a prettier map. A finding is actionable when it
   carries the whole chain: *what actually happens → what it costs → where it
   breaks → what to change → who must agree → whether it worked after.* This engine
-  delivers the **first link, honestly**: the evidenced process + variant
-  frequencies + the exceptions and gaps. Cost/value and the change/sign-off/measure
-  links are the product around it. We say plainly the build stops at the first link.
+  delivers the **first links, honestly**: the evidenced process + variant
+  frequencies + the exceptions and gaps, then **where it breaks and how often** —
+  measured waits, the bottleneck, off-route and rework rates, each opening to the
+  runs behind it — and the owner's confirm/dispute on every claim. Money, the
+  change itself, and after-the-change measurement are the product around it.
+  Re-running on new data and comparing the performance block is the "did it work"
+  link in its simplest form.
 - **Drift.** Because `raw` is kept and every claim is evidenced and timestamped,
   re-running on fresh data and diffing the induced model against the owner-
   confirmed one is how drift would surface — as new divergences.
@@ -470,6 +483,8 @@ induction/
   pipeline.py        induce() (shared core) + thin per-source loaders
   emit.py            InducedModel -> model.json
   inspector.py       InducedModel -> self-contained inspector.html
+  findings.py        per-process performance: waits, bottleneck, off-route, rework (measured)
+  review.py          owner review: stable claim ids, corrections.json, divergence
 tests/               golden fixture + ugly-record cases + held-out slice + tabular
 ```
 

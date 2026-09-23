@@ -63,7 +63,7 @@ def infer_names(model, enable: bool = False, api_model: str | None = None, namer
 
     if not enable or not os.environ.get("ANTHROPIC_API_KEY"):
         return {}
-    from induction.anthropic_call import client, with_backoff
+    from induction.anthropic_call import DEFAULT_OPUS, client, effort_kwargs, with_backoff
     try:
         api = client()
     except ImportError:
@@ -72,11 +72,13 @@ def infer_names(model, enable: bool = False, api_model: str | None = None, namer
     try:
         log(f"naming: labelling {len(payload.get('kinds', []))} kinds and "
             f"{len(payload.get('activities', []))} activities with the model")
+        use_model = api_model or os.environ.get("INDUCTION_NAMING_MODEL", DEFAULT_OPUS)
+
         def once():
             # Streamed, like the reading pass: an 8k ceiling with thinking under
             # it can hold a blocking connection open long enough to time out.
             with api.messages.stream(
-                model=api_model or os.environ.get("INDUCTION_NAMING_MODEL", "claude-opus-5"),
+                model=use_model, **effort_kwargs(use_model),
                 # Room for the answer PLUS the model's thinking, which counts
                 # against this ceiling — see abstraction.py's note on the caps.
                 max_tokens=8000,

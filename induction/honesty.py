@@ -12,9 +12,9 @@ record into a visible finding rather than a silent drop:
   - unknowns: actor / time / order that is genuinely unavailable is marked
               `unknown`. Absence is a finding, not a blank to fill.
 
-`divergence` (belief vs data) is a *hook*, not a workflow — see emit.py and the
-README. We keep `raw` next to inferred structure so a later validation step can
-compare what the owner believes against what the data shows.
+`divergence` (belief vs data) is filled by the owner review in `review.py`: a
+disputed claim is kept beside what the records show, never removed. We keep
+`raw` next to inferred structure so that comparison always has both sides.
 """
 
 from __future__ import annotations

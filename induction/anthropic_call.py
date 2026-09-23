@@ -27,6 +27,22 @@ from typing import Callable, Optional, TypeVar
 
 T = TypeVar("T")
 
+# The model for the high-stakes generative calls: discovery, record reading and
+# naming. One place, so a customer's choice (or an env var) moves all of them.
+DEFAULT_OPUS = "claude-opus-5-5"
+
+
+def effort_kwargs(model: str) -> dict:
+    """Request kwargs that keep the reasoning depth these calls were tuned at.
+
+    Claude Opus 5.5 defaults to `medium` effort, one level below Claude Opus 5's
+    `high`. Discovery sets the vocabulary everything downstream is graded
+    against, so it asks for `high` explicitly. Only for Opus 5.5: other models
+    keep their own default, and some (Haiku 4.5) reject `effort` outright."""
+    if str(model).startswith("claude-opus-5-5"):
+        return {"output_config": {"effort": "high"}}
+    return {}
+
 # Statuses worth waiting out: request timeout, conflict, rate-limit, and the 5xx
 # family (500/502/503/504 and Anthropic's 529 overloaded). Everything else — a
 # 400/401/403/404 — is the caller's problem and must not be retried.

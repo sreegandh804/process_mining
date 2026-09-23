@@ -21,6 +21,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from induction.abstraction import Abstraction
+from induction.findings import measure
+from induction.review import claim_id, reconcile, status_of
 from induction.steps.variants import shape
 from induction.pipeline import InducedModel
 
@@ -35,7 +37,8 @@ _ITEM_WORDS = {
 }
 
 
-def build_view(m: InducedModel, names: dict | None = None, activities: dict | None = None) -> dict:
+def build_view(m: InducedModel, names: dict | None = None, activities: dict | None = None,
+               corrections: dict | None = None) -> dict:
     names = names or {}
     # `is None`, not `or {}`. An `Abstraction` is falsy when it read nothing, and
     # an abstraction that read nothing is exactly the one with the most to say:
@@ -176,6 +179,8 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
     n_projects = sum(1 for k in m.kinds if k.features.get("project"))
     n_unplaced = sum(1 for r in runs if r["kind_id"] in leftover_ids)
 
+    review = _performance_and_review(processes, runs_by_kind, item, items, corrections or {})
+
     return {
         "meta": {
             "title": "How the work runs" if items == "runs" else f"How your {items} run",
@@ -202,7 +207,59 @@ def build_view(m: InducedModel, names: dict | None = None, activities: dict | No
         "decisions": _decision_index(m),
         "vocabulary": vocabulary,
         "orphans": orphans,
+        # The owner-review state: every claim's status, what disputes the records
+        # still contradict, and the earlier answers (so an export accumulates).
+        "review": review,
     }
+
+
+def _performance_and_review(processes, runs_by_kind, item, items, answers) -> dict:
+    """Attach each process's measured performance, and make every statement on
+    its card a reviewable claim.
+
+    Measurements run on exactly the step sequence the card draws (read steps, in
+    run order), so a figure can never describe a different process from the one
+    on screen. Claims carry a stable id and, beside the statement, what the
+    records currently show — which is what a dispute is set against."""
+    claims = []
+    for p in processes:
+        if p["leftover"]:
+            p["performance"], p["claims"] = None, {}
+            continue
+        kruns = runs_by_kind.get(p["id"], [])
+        seqs = [{"key": r["key"],
+                 "steps": [(n["name"], n.get("ts")) for n in r["activities"]
+                           if not n.get("unread_step")],
+                 "offsystem": bool(r["inferred"])} for r in kruns]
+        perf = measure(seqs, p["canon"], items, item)
+        p["performance"] = perf
+        with_steps = [s for s in seqs if s["steps"]]
+        n = len(with_steps)
+
+        pc = {"id": claim_id("process", p["name"], *p["flow"]),
+              "text": f"{p['name']}: {' → '.join(p['flow']) or 'no steps read'}",
+              "evidence": f"{p['count']} {items} were grouped into this process."}
+        step_claims = {}
+        for st in p["flow"]:
+            seen = sum(1 for s in with_steps if any(x == st for x, _ in s["steps"]))
+            step_claims[st] = {"id": claim_id("step", p["name"], st),
+                               "text": f"{st} is a step in {p['name']}",
+                               "found_in": f"{seen} of {n} {items}",
+                               "evidence": f"{st[:1].upper() + st[1:]} appears in {seen} of {n} {items}."}
+        h = perf["headline"] or {}
+        lw = perf["metrics"].get("longest_wait") or {}
+        fc = None
+        if h.get("kind") not in (None, "insufficient", "steady"):
+            anchor = (lw.get("from", ""), lw.get("to", "")) if h["kind"] == "bottleneck" else ()
+            fc = {"id": claim_id("finding", p["name"], h["kind"], *anchor),
+                  "text": h["text"], "evidence": f"{h['text']} {h.get('coverage', '')}".strip()}
+        for c in [pc, *step_claims.values(), *([fc] if fc else [])]:
+            c["status"] = status_of(c["id"], answers)
+            claims.append(c)
+        p["claims"] = {"process": pc, "steps": step_claims, "finding": fc}
+    rec = reconcile(claims, answers)
+    rec["prior"] = list(answers.values())
+    return rec
 
 
 def _naming_provenance(m, abstraction) -> list[dict]:
@@ -663,6 +720,9 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
                 # detail ("review requested"), not the inferred step name
                 "verb": ev.action.replace("_", " "),
                 "when": (ev.timestamp or "").split("T")[0] or "—",
+                # The full timestamp, for the performance measurements only; the
+                # page shows the date above.
+                "ts": ev.timestamp or None,
                 # A read activity shows the span it was read from: the difference
                 # between a claim you can check and one you have to accept.
                 "who": who, "inferred": False, "note": abstraction.span_of(ev.id) or "",
@@ -698,6 +758,10 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
     for n in nodes:
         whens = [a["when"] for a in n["arts"] if a["when"] not in ("—", "no date")]
         n["when"] = min(whens) if whens else "—"
+        # When the step was first seen, from event records only: an observation
+        # carries a state, not the time a step was done, so it is never timed.
+        stamps = [a["ts"] for a in n["arts"] if a.get("ts")]
+        n["ts"] = min(stamps) if stamps else None
         n["sources"] = sorted({a["src_kind"] for a in n["arts"] if a["src_kind"]})
         n["n"] = len(n["arts"])
 
@@ -734,6 +798,9 @@ def _run_view(case, kind, m, events_by_id, obs_by_id, ents, pname, step_label,
 
     return {
         "id": disp,
+        # Unique across sources (display ids can collide); what a finding's
+        # "view these runs" link filters on.
+        "key": case.id,
         "title": _run_title(case, ents, disp),
         "actor": (actors.most_common(1)[0][0] if actors else "—"),
         "status": status,
@@ -772,10 +839,10 @@ def _deviation(case, kind, canon, gaps, step_label):
 
 
 def write_html(m: InducedModel, path: str | Path, names: dict | None = None,
-               activities: dict | None = None) -> Path:
+               activities: dict | None = None, corrections: dict | None = None) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    view = build_view(m, names, activities)
+    view = build_view(m, names, activities, corrections)
     path.write_text(_TEMPLATE.replace("/*DATA*/", json.dumps(view, default=str)))
     return path
 
@@ -893,6 +960,49 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .gl td:nth-child(2){width:70px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
   .gl .unc{color:var(--open)}
   .gl .phs{margin-top:4px}.gl .ph{display:inline-block;font-family:var(--mono);font-size:11.5px;color:var(--ink-2);background:var(--canvas);border-radius:4px;padding:1px 6px;margin:2px 4px 0 0}
+  /* Process Performance: measured figures, each opening to the runs behind it. */
+  .perf{border:1px solid var(--rule);border-radius:10px;margin-top:18px;overflow:hidden}
+  .perfhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--rule);background:#fafbfc}
+  .perfhead h3{font:600 13px/1.3 var(--sans);letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2);margin:0}
+  .perfhead .note{font-size:12.5px;color:var(--ink-3);margin-left:auto}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .tile{font:inherit;text-align:left;background:var(--paper);border:0;border-right:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:12px 16px;color:inherit;cursor:pointer;min-width:0}
+  .tile:hover{background:#f7f9fb}.tile[disabled]{cursor:default}.tile[disabled]:hover{background:var(--paper)}
+  .tile .k{display:block;font-size:12px;color:var(--ink-3)}
+  .tile .v{display:block;font:500 22px/1.25 var(--sans);font-variant-numeric:tabular-nums;margin:2px 0}
+  .tile .v.na{font-size:14px;font-weight:400;color:var(--ink-3);padding:5px 0}
+  .tile .d{display:block;font-size:12px;color:var(--ink-2);overflow-wrap:anywhere}
+  .tile.hot .v{color:var(--attn)}
+  .finding{padding:14px 16px}
+  .finding .lab{font-size:12px;color:var(--ink-3);margin:0 0 2px}
+  .finding .txt{font-size:15.5px;font-weight:500;margin:0}
+  .finding .cav{font-size:13px;color:var(--open);margin:6px 0 0}
+  .finding .cov{font-size:12.5px;color:var(--ink-3);margin:6px 0 0}
+  .finding .cov button,.linkbtn{font:inherit;background:none;border:0;padding:0;color:var(--read);cursor:pointer}
+  .finding .cov button:hover,.linkbtn:hover{text-decoration:underline}
+  .money{font-size:12.5px;color:var(--ink-3);padding:10px 16px;border-top:1px solid var(--rule);background:#fafbfc}
+  .insuff{font-size:13.5px;color:var(--ink-2);padding:12px 16px;margin:0}
+  .arw.wait{font-size:11.5px;color:var(--ink-3);white-space:nowrap}.arw.wait.hot{color:var(--attn);font-weight:600}
+  /* Owner review: every claim can be confirmed or disputed; a dispute sits
+     beside the records, it never replaces them. */
+  .rv{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
+  .badge{font-size:11.5px;border-radius:999px;padding:2px 9px;border:1px solid var(--rule-2);color:var(--ink-2);background:var(--paper)}
+  .badge.confirmed{color:#1f5a33;background:#e7f3eb;border-color:#b9dcc5}
+  .badge.disputed{color:#8f2f19;background:#fbece7;border-color:#efc3b6}
+  .rvbtn{font:inherit;font-size:12.5px;background:var(--paper);border:1px solid var(--rule-2);border-radius:6px;padding:3px 10px;color:var(--ink);cursor:pointer}
+  .rvbtn:hover{border-color:var(--ink-3)}.rvbtn[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff}
+  .rvnote{display:flex;gap:6px;width:100%;margin-top:4px}
+  .rvnote[hidden]{display:none}
+  .rvnote input{flex:1;min-width:0;font:inherit;font-size:13px;padding:5px 9px;border:1px solid var(--rule-2);border-radius:6px}
+  .dispute{width:100%;font-size:13px;color:#6d2513;background:#fdf4f1;border-left:3px solid #d9826a;padding:7px 10px;margin-top:6px;border-radius:0 6px 6px 0}
+  .dispute b{font-weight:600}
+  .rvsteps{margin-top:12px}.rvsteps summary{cursor:pointer;font-size:13px;color:var(--read)}
+  .rvsteps td{vertical-align:middle}.rvsteps .rv{margin-top:0}
+  .keyfilter{display:flex;gap:10px;align-items:baseline;font-size:13px;background:var(--read-bg);color:var(--read-ink);border-radius:6px;padding:7px 11px;margin:0 0 10px}
+  .export{font:inherit;font-size:13px;background:var(--ink);color:#fff;border:0;border-radius:6px;padding:4px 12px;cursor:pointer}
+  .export[disabled]{opacity:.45;cursor:default}
+  .rvsum{font-size:13px;color:var(--ink-2)}
+  .unmatched{font-size:12.5px;color:var(--open);width:100%;padding-bottom:8px}
   @media (max-width:880px){.shell{grid-template-columns:1fr;gap:14px}nav.rail{position:static;display:flex;gap:6px;overflow-x:auto;padding-bottom:4px}
     .railcap{display:none}.rowbtn{width:auto;white-space:nowrap;border:1px solid var(--rule-2);background:var(--paper)}.card{padding:18px 16px}.stats .disclose{margin-left:0}}
 </style></head>
@@ -910,6 +1020,7 @@ _TEMPLATE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <script>
 const V = JSON.parse(document.getElementById('data').textContent);
 const esc = s => (s==null?'':String(s)).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
+const escA = s => esc(s).replace(/"/g,'&quot;');
 const M = V.meta, items = M.items, item = M.item;
 const STEPS = Object.fromEntries((V.vocabulary||[]).map(v=>[v.activity, v]));
 const procs = V.processes.filter(p=>!p.leftover && !p.project);
@@ -922,7 +1033,9 @@ document.getElementById('stats').innerHTML =
   `<span><b>${M.n_records}</b> records</span><span><b>${M.n_runs}</b> ${esc(items)}</span>` +
   `<span><b>${M.n_processes}</b> process${M.n_processes===1?'':'es'}</span>` +
   (M.n_projects?`<span><b>${M.n_projects}</b> project${M.n_projects===1?'':'s'}</span>`:'') +
-  (leftover?`<button class="disclose" data-go="leftover"><b>${M.n_unplaced}</b> ${esc(items)} not placed ↓</button>`:'');
+  (leftover?`<button class="disclose" data-go="leftover"><b>${M.n_unplaced}</b> ${esc(items)} not placed ↓</button>`:'') +
+  `<span class="rvsum" id="rvsum"></span><button class="export" id="export" type="button">Export review</button>` +
+  ((V.review&&V.review.unmatched||[]).length?`<span class="unmatched">${V.review.unmatched.length} earlier review answer${V.review.unmatched.length===1?' refers':'s refer'} to something no longer on this page (the records or names changed): ${V.review.unmatched.map(a=>'“'+esc(a.claim)+'”').join('; ')}. Kept in the export.</span>`:'');
 
 let current = (location.hash||'').slice(1) || (procs[0]||projects[0]||{id:'glossary'}).id;
 const rail = document.getElementById('rail'), pane = document.getElementById('pane');
@@ -967,7 +1080,7 @@ function detail(r){
 
 function threadTable(rs, withReason){
   if(!rs.length) return `<p class="more">None.</p>`;
-  const rows = rs.map((r,i)=>`<tr>
+  const rows = rs.map((r,i)=>`<tr data-key="${escA(r.key)}">
       <td><button class="thread" data-th="${i}" aria-expanded="false"><span class="t">${esc(r.title)}</span>${r.chip_word?`<span class="tchip">${esc(r.chip_word)}</span>`:''}<span class="id">${esc(r.id)}</span></button></td>
       <td>${esc(r.actor)}</td>
       <td class="path path1" title="${esc(r.path)}">${esc(r.path)}</td>
@@ -990,11 +1103,17 @@ function renderNode(p){
     ${p.actors.length?`<p class="who">${p.actors.map(esc).join('  ')}</p>`:''}
     ${p.why?`<div class="why"><b>Why these are one ${p.project?'project':'process'} (${esc(p.tier)}):</b> ${esc(p.why)}</div>`:''}
     ${p.flagged?`<div class="why"><b>Looks like a process, isn't:</b> ${esc(p.flag_note)}${decChip('reject',p.id,null,'why')}</div>`:''}
+    ${perfBlock(p)}
     <div class="band">
       <div class="bandhead"><h3>The steps, in the order they usually happen</h3></div>
-      ${p.flow.length?`<div class="flow">${flow(p.flow)}</div>
-      <p class="legend">Dotted underline: the name was read from the records' own words. Click any step for those words.</p>`:`<p class="legend">No step in this ${esc(item)} was read.</p>`}
+      ${p.flow.length?`<div class="flow">${flowWaits(p)}</div>
+      <p class="legend">Dotted underline: the name was read from the records' own words. Click any step for those words.${hasWaits(p)?' Times between steps are medians over the '+esc(items)+' with a date on both steps.':''}</p>`:`<p class="legend">No step in this ${esc(item)} was read.</p>`}
       <div data-prov></div>
+      ${p.claims&&p.claims.process?reviewCtl(p.claims.process, 'Is this how this process runs?'):''}
+      ${p.claims&&Object.keys(p.claims.steps||{}).length?`<details class="rvsteps" data-pid="${escA(p.id)}" ${STEPS_OPEN[p.id]?'open':''}><summary>Review individual steps (${Object.keys(p.claims.steps).length})</summary>
+        <table><thead><tr><th>Step</th><th>Found in</th><th>Review</th></tr></thead><tbody>
+        ${Object.entries(p.claims.steps).map(([st,c])=>`<tr><td>${esc(st)}</td><td class="tag">${esc(c.found_in)}</td><td>${reviewCtl(c)}</td></tr>`).join('')}
+        </tbody></table></details>`:''}
     </div>
     <div class="band">
       <div class="bandhead"><h3>Routes taken</h3>
@@ -1004,10 +1123,153 @@ function renderNode(p){
     </div>
     <div class="band">
       <div class="bandhead"><h3>${esc(items[0].toUpperCase()+items.slice(1))}</h3><span class="note">every row opens to its records</span></div>
+      <div data-keyfilter></div>
       ${threadTable(rs,false)}
     </div>
   </div>`;
 }
+
+// --- Process Performance ----------------------------------------------------
+// Every figure is measured from dated records, never estimated; each tile opens
+// to the runs behind it. Too few runs, and the block says so instead of a number.
+const RUNSETS = {};
+let runsetSeq = 0;
+function runset(keys, label){ const id='rs'+(runsetSeq++); RUNSETS[id]={keys, label}; return id; }
+const cap = s => s ? s[0].toUpperCase()+s.slice(1) : s;
+
+function tile(key, val, detail, keys, label, hot){
+  const na = val==null;
+  const rs = (!na && keys && keys.length) ? runset(keys, label) : '';
+  return `<button class="tile ${hot?'hot':''}" type="button" ${rs?`data-runset="${rs}" title="Show the ${esc(items)} behind this figure"`:'disabled'}>
+    <span class="k">${esc(key)}</span><span class="v ${na?'na':''}">${na?'Not enough dated records':esc(val)}</span><span class="d">${esc(detail||'')}</span></button>`;
+}
+
+function perfBlock(p){
+  const P = p.performance;
+  if(!P) return '';
+  const head = `<div class="perfhead"><h3>Process Performance</h3><span class="note">Measured from ${esc(item)} records · no estimates</span></div>`;
+  if(!P.enough) return `<div class="perf">${head}<p class="insuff">${esc(P.headline.text)}</p></div>`;
+  const m = P.metrics, cy = m.cycle||{}, lw = m.longest_wait||{}, off = m.off_route||{}, nc = m.not_completed||{}, rw = m.rework||{};
+  const hot = P.headline && P.headline.kind;
+  const tiles = [
+    tile('End-to-end time (median)', cy.insufficient?null:cy.median,
+         cy.insufficient?'':`slowest 10%: ${cy.slowest_10pct} · measured on ${cy.measured} of ${cy.of}`, cy.runs, 'end-to-end time'),
+    tile('Biggest wait between steps', lw.insufficient?null:lw.share_pct+'% of all time',
+         lw.insufficient?'':`${cap(lw.from)} → ${cap(lw.to)} · median ${lw.median} · ${lw.measured} of ${lw.of_timed}`, lw.runs,
+         lw.insufficient?'':`the wait from ${cap(lw.from)} to ${cap(lw.to)}`, hot==='bottleneck'),
+    tile('Off the most common route', off.no_usual_route?null:off.pct+'%',
+         off.no_usual_route?'no usual route exists':`${off.count} of ${off.of} ${items}`, off.runs, 'off the most common route', hot==='exception'),
+    tile('Not completed', nc.no_usual_route?null:nc.pct+'%',
+         nc.no_usual_route?'':`${nc.count} of ${nc.of} did not reach ${cap(nc.final_step)}`, nc.runs, `did not reach ${cap(nc.final_step||'')}`),
+    tile('Rework', rw.count!=null?String(rw.count):null,
+         rw.count!=null?`${rw.pct}% returned to a step already done`:'', rw.runs, 'returned to a step already done', hot==='rework'),
+  ].join('');
+  const h = P.headline || {};
+  const view = (h.runs||[]).length ? ` · <button type="button" data-runset="${runset(h.runs, 'the key finding')}">View ${h.runs.length} ${esc(h.runs.length===1?item:items)} →</button>` : '';
+  const fc = p.claims && p.claims.finding;
+  const finding = `<div class="finding"><p class="lab">Key finding</p><p class="txt">${esc(h.text)}</p>
+    ${h.caveat?`<p class="cav">${esc(h.caveat)}</p>`:''}
+    <p class="cov">${esc(h.coverage||'')}${view}</p>
+    ${fc?reviewCtl(fc):''}</div>`;
+  return `<div class="perf">${head}<div class="tiles">${tiles}</div>${finding}
+    <div class="money"><b>Cost:</b> not shown. ${esc(P.money.why)}</div></div>`;
+}
+
+function waitsOf(p){ return (p.performance && p.performance.metrics && p.performance.metrics.waits) || []; }
+function hasWaits(p){ return waitsOf(p).length>0; }
+function flowWaits(p){
+  const W = waitsOf(p), lw = (p.performance&&p.performance.metrics||{}).longest_wait||{};
+  const hotKey = p.performance && p.performance.headline && p.performance.headline.kind==='bottleneck' ? lw.from+'\u0000'+lw.to : null;
+  return p.flow.map((st,i)=>{
+    if(i===0) return chip(st);
+    const w = W.find(x=>x.from===p.flow[i-1] && x.to===st);
+    const arrow = w ? `<span class="arw wait ${hotKey===w.from+'\u0000'+w.to?'hot':''}" title="median over ${w.measured} ${esc(items)}">— ${esc(w.median)} →</span>` : '<span class="arw">→</span>';
+    return arrow + chip(st);
+  }).join('');
+}
+
+// --- Owner review -----------------------------------------------------------
+// Answers live in memory until exported. Earlier answers (passed back to the run
+// with --corrections) are preloaded, so an export always carries the whole review.
+const ANS = {};
+((V.review&&V.review.prior)||[]).forEach(a=>{ ANS[a.claim_id] = Object.assign({}, a); });
+const CLAIMS = {};
+const STEPS_OPEN = {};   // keeps "Review individual steps" open across re-renders
+let unsaved = false;
+
+function reviewCtl(c, ask){
+  CLAIMS[c.id] = c;
+  const a = ANS[c.id];
+  const state = a ? (a.verdict==='confirm'?'confirmed':'disputed') : 'pending';
+  const badge = {pending:'Pending review', confirmed:'Confirmed by process owner', disputed:'Disputed by process owner'}[state];
+  const dispute = state==='disputed' ? `<div class="dispute"><b>Owner:</b> ${a.note?esc(a.note):'this is not right.'} <b>Records:</b> ${esc(c.evidence)}</div>` : '';
+  const noteShown = a && a.note && state==='confirmed' ? `<span class="tag">“${esc(a.note)}”</span>` : '';
+  return `<div class="rv" data-claim="${escA(c.id)}">${ask?`<span class="tag">${esc(ask)}</span>`:''}
+    <span class="badge ${state}">${badge}</span>
+    <button class="rvbtn" type="button" data-verdict="confirm" aria-pressed="${state==='confirmed'}">Confirm</button>
+    <button class="rvbtn" type="button" data-verdict="dispute" aria-pressed="${state==='disputed'}">Dispute</button>
+    ${a?`<button class="rvbtn" type="button" data-addnote>Add note</button>`:''}${noteShown}
+    <div class="rvnote" hidden><input type="text" placeholder="${state==='disputed'||!a?'What happens in practice?':'Note'}" value="${a&&a.note?escA(a.note):''}"><button class="rvbtn" type="button" data-savenote>Save</button></div>
+    ${dispute}</div>`;
+}
+
+function answer(id, verdict, note){
+  const c = CLAIMS[id]; const prev = ANS[id];
+  ANS[id] = {claim_id:id, claim:c?c.text:(prev&&prev.claim)||'', verdict,
+             note: note!=null ? note : (prev&&prev.verdict===verdict ? prev.note||'' : ''), at:new Date().toISOString()};
+  unsaved = true;
+}
+
+function refreshReview(){
+  const vals = Object.values(ANS), claimIds = Object.keys(CLAIMS);
+  const conf = vals.filter(a=>a.verdict==='confirm').length, disp = vals.filter(a=>a.verdict==='dispute').length;
+  document.getElementById('rvsum').textContent = `Review: ${conf} confirmed · ${disp} disputed`;
+  const b = document.getElementById('export'); b.disabled = !vals.length;
+  b.textContent = vals.length ? `Export review (${vals.length})` : 'Export review';
+}
+
+function wireReview(){
+  pane.querySelectorAll('.rv').forEach(box=>{
+    const id = box.dataset.claim, note = box.querySelector('.rvnote'), input = note.querySelector('input');
+    box.querySelectorAll('[data-verdict]').forEach(b=>b.onclick=()=>{
+      answer(id, b.dataset.verdict);
+      if(b.dataset.verdict==='dispute'){ rerender(); const nb = pane.querySelector(`.rv[data-claim="${id}"] .rvnote`); if(nb){ nb.hidden=false; nb.querySelector('input').focus(); } }
+      else rerender();
+    });
+    const an = box.querySelector('[data-addnote]');
+    if(an) an.onclick=()=>{ note.hidden=!note.hidden; if(!note.hidden) input.focus(); };
+    const save = ()=>{ const a = ANS[id]; answer(id, a?a.verdict:'dispute', input.value.trim()); rerender(); };
+    note.querySelector('[data-savenote]').onclick = save;
+    input.onkeydown = e=>{ if(e.key==='Enter') save(); };
+  });
+  pane.querySelectorAll('[data-runset]').forEach(b=>b.onclick=()=>showRunset(b.dataset.runset));
+  pane.querySelectorAll('details.rvsteps').forEach(d=>d.ontoggle=()=>{ STEPS_OPEN[d.dataset.pid]=d.open; });
+}
+
+function rerender(){ const y = window.scrollY; render(); window.scrollTo(0, y); }
+
+// Filter the card's table to the runs behind one figure.
+function showRunset(id){
+  const rs = RUNSETS[id]; if(!rs) return;
+  const keys = new Set(rs.keys), bar = pane.querySelector('[data-keyfilter]');
+  pane.querySelectorAll('[data-tbody] tr:not(.det)').forEach(tr=>{
+    const hit = keys.has(tr.dataset.key); tr.hidden = !hit;
+    const det = tr.nextElementSibling; if(det && det.classList.contains('det') && !hit) det.hidden = true; });
+  if(bar){ bar.innerHTML = `<div class="keyfilter">Showing ${rs.keys.length} ${esc(rs.keys.length===1?item:items)} behind: ${esc(rs.label)} <button class="linkbtn" type="button" data-clearkeys>Show all</button></div>`;
+    bar.querySelector('[data-clearkeys]').onclick=()=>{ bar.innerHTML=''; pane.querySelectorAll('[data-tbody] tr:not(.det)').forEach(tr=>tr.hidden=false); };
+    bar.scrollIntoView({behavior:'smooth', block:'start'}); }
+}
+
+document.getElementById('export').onclick = ()=>{
+  const doc = {version:1, exported_at:new Date().toISOString(), about:M.title,
+               note:'Pass this file back with --corrections to record the review in the next run.',
+               answers:Object.values(ANS)};
+  const url = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], {type:'application/json'}));
+  const a = document.createElement('a'); a.href = url; a.download = 'corrections.json';
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  unsaved = false;
+};
+window.addEventListener('beforeunload', e=>{ if(unsaved){ e.preventDefault(); e.returnValue=''; } });
 
 function renderLeftover(){
   const p = leftover, rs = runsOf(p.id);
@@ -1040,7 +1302,7 @@ function render(){
   if(current==='leftover' && leftover) pane.innerHTML = renderLeftover();
   else if(current==='glossary') pane.innerHTML = renderGlossary();
   else { const p = V.processes.find(x=>x.id===current) || procs[0] || projects[0]; if(!p){ current='glossary'; return render(); } pane.innerHTML = renderNode(p); }
-  wire();
+  wire(); wireReview(); refreshReview();
 }
 function wire(){
   document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{ current=b.dataset.go; location.hash=current; render(); pane.focus(); });
